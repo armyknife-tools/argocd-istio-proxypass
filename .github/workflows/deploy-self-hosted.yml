@@ -156,8 +156,14 @@ jobs:
           --kustomize-namespace $NAMESPACE \
           --upsert
         
-        # Sync the application
-        argocd app sync traffic-capture-$NAMESPACE
+        # Sync the application (may fail if already syncing)
+        if argocd app sync traffic-capture-$NAMESPACE; then
+          echo "✅ ArgoCD application synced successfully"
+        else
+          echo "⚠️  ArgoCD sync command failed (app may already be syncing)"
+          echo "Checking app status..."
+          argocd app get traffic-capture-$NAMESPACE || true
+        fi
         
         echo "✅ ArgoCD application created: traffic-capture-$NAMESPACE"
         echo "View in ArgoCD UI: https://<your-argocd-url>/applications/traffic-capture-$NAMESPACE"

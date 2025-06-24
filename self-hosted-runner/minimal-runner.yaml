@@ -1,0 +1,37 @@
+apiVersion: actions.summerwind.dev/v1alpha1
+kind: RunnerDeployment
+metadata:
+  name: github-runner-minimal
+  namespace: actions-runner-system
+spec:
+  replicas: 1
+  template:
+    spec:
+      repository: armyknife-tools/argocd-istio-proxypass
+      labels:
+        - self-hosted
+        - linux
+      
+      # Docker in Docker for running containers
+      dockerEnabled: true
+      dockerdWithinRunnerContainer: true
+      
+      # Use the dind image
+      image: summerwind/actions-runner-dind:latest
+      
+      # Service account
+      serviceAccountName: github-runner
+      
+      # Environment variables
+      env:
+      - name: RUNNER_FEATURE_FLAG_EPHEMERAL
+        value: "true"
+      
+      # Minimal resources
+      resources:
+        limits:
+          cpu: "500m"
+          memory: "1Gi"
+        requests:
+          cpu: "100m"
+          memory: "256Mi"
