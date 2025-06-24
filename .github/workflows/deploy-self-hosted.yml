@@ -127,8 +127,10 @@ jobs:
         # Install ArgoCD CLI if not available
         if ! command -v argocd &> /dev/null; then
           echo "Installing ArgoCD CLI..."
-          curl -sSL -o /usr/local/bin/argocd https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
-          chmod +x /usr/local/bin/argocd
+          curl -sSL -o ./argocd https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
+          chmod +x ./argocd
+          sudo mv ./argocd /usr/local/bin/ || mv ./argocd /tmp/
+          export PATH="/tmp:$PATH"
         fi
         
         # Since we're running inside the cluster, we can use the internal service
