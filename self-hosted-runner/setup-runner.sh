@@ -24,13 +24,33 @@ helm list -A | grep "^arc" | while read name namespace rest; do
 done
 
 # Clean up old namespaces
-kubectl delete namespace actions-runner-system --wait=false 2>/dev/null || true
-kubectl delete namespace arc-system --wait=false 2>/dev/null || true
-kubectl delete namespace github-runner --wait=false 2>/dev/null || true
+NAMESPACES_TO_DELETE=("actions-runner-system" "arc-system" "github-runner")
+for ns in "${NAMESPACES_TO_DELETE[@]}"; do
+  if kubectl get namespace $ns 2>/dev/null; then
+    echo "Deleting namespace $ns..."
+    kubectl delete namespace $ns --wait=false 2>/dev/null || true
+  fi
+done
 
-# Wait for cleanup
-echo "Waiting for cleanup..."
-sleep 10
+# Force delete any stuck namespaces
+echo "Checking for stuck namespaces..."
+for ns in "${NAMESPACES_TO_DELETE[@]}"; do
+  if kubectl get namespace $ns 2>/dev/null | grep -q Terminating; then
+    echo "Force cleaning namespace $ns..."
+    kubectl get namespace $ns -o json | jq '.spec.finalizers = []' | kubectl replace --raw "/api/v1/namespaces/$ns/finalize" -f - 2>/dev/null || true
+  fi
+done
+
+# Wait for all namespaces to be gone
+echo "Waiting for namespace cleanup..."
+for i in {1..30}; do
+  if ! kubectl get namespace actions-runner-system 2>/dev/null; then
+    echo "Namespace deleted successfully"
+    break
+  fi
+  echo "Waiting for namespace deletion... ($i/30)"
+  sleep 2
+done
 
 # Step 1: Ensure cert-manager is installed and ready
 echo -e "\n2. Checking cert-manager..."
@@ -44,17 +64,21 @@ if ! kubectl get namespace cert-manager 2>/dev/null; then
   sleep 20  # Extra wait for webhooks
 else
   echo "cert-manager already installed"
+  # Ensure cert-manager is actually ready
+  kubectl wait --for=condition=available --timeout=60s deployment/cert-manager -n cert-manager || true
+  kubectl wait --for=condition=available --timeout=60s deployment/cert-manager-webhook -n cert-manager || true
 fi
 
 # Step 2: Create namespace for ARC
 echo -e "\n3. Creating namespace..."
-kubectl create namespace $NAMESPACE
+kubectl create namespace $NAMESPACE 2>/dev/null || echo "Namespace already exists"
 
 # Step 3: Create GitHub token secret
 echo "4. Creating GitHub token secret..."
 kubectl create secret generic controller-manager \
   -n $NAMESPACE \
-  --from-literal=github_token="${GITHUB_TOKEN}"
+  --from-literal=github_token="${GITHUB_TOKEN}" \
+  --dry-run=client -o yaml | kubectl apply -f -
 
 # Step 4: Install ARC with proper configuration
 echo -e "\n5. Installing actions-runner-controller..."
@@ -69,12 +93,6 @@ cat > /tmp/arc-values.yaml <<EOF
 authSecret:
   create: false
   name: controller-manager
-  github_token: "github_token"
-
-# Image configuration
-image:
-  repository: summerwind/actions-runner-controller
-  tag: v0.27.6
 
 # Webhook configuration
 webhook:
@@ -84,34 +102,50 @@ webhook:
 certManager:
   enabled: true
 
-# Metrics configuration  
-metrics:
-  serviceMonitor: false
-  port: 8443
-
-# Log level
-logLevel: info
-
 # Resources
 resources:
   limits:
-    cpu: 100m
-    memory: 128Mi
+    cpu: 200m
+    memory: 256Mi
   requests:
     cpu: 100m
     memory: 128Mi
 EOF
 
-helm install arc actions-runner-controller/actions-runner-controller \
+# Use a stable chart version
+ARC_CHART_VERSION="0.23.7"  # This includes app version 0.27.6
+echo "Installing actions-runner-controller chart version: $ARC_CHART_VERSION"
+
+if helm install arc actions-runner-controller/actions-runner-controller \
   --namespace $NAMESPACE \
-  --version 0.22.0 \
+  --version $ARC_CHART_VERSION \
   --values /tmp/arc-values.yaml \
-  --wait
+  --wait \
+  --timeout 5m; then
+  echo "✅ ARC installed successfully"
+else
+  echo "❌ ARC installation failed, checking logs..."
+  kubectl logs -n $NAMESPACE -l app.kubernetes.io/name=actions-runner-controller --tail=50
+  exit 1
+fi
 
 # Step 5: Wait for controller to be ready
 echo -e "\n6. Waiting for controller to be ready..."
-kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=actions-runner-controller \
-  -n $NAMESPACE --timeout=300s
+if ! kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=actions-runner-controller \
+  -n $NAMESPACE --timeout=300s; then
+  echo "❌ Controller pod not ready, checking status..."
+  kubectl get pods -n $NAMESPACE
+  kubectl describe pod -n $NAMESPACE -l app.kubernetes.io/name=actions-runner-controller
+  exit 1
+fi
+
+# Verify controller is actually running
+CONTROLLER_POD=$(kubectl get pod -n $NAMESPACE -l app.kubernetes.io/name=actions-runner-controller -o name | head -1)
+if [ -z "$CONTROLLER_POD" ]; then
+  echo "❌ No controller pod found!"
+  exit 1
+fi
+echo "✅ Controller is running: $CONTROLLER_POD"
 
 # Step 6: Apply RBAC for runners
 echo -e "\n7. Applying RBAC..."
@@ -137,7 +171,7 @@ rules:
   resources: ["namespaces"]
   verbs: ["get", "list", "create", "patch", "update"]
 - apiGroups: [""]
-  resources: ["pods", "services", "configmaps", "secrets"]
+  resources: ["pods", "services", "configmaps", "secrets", "serviceaccounts"]
   verbs: ["get", "list", "create", "update", "patch", "delete", "watch"]
 - apiGroups: ["apps"]
   resources: ["deployments", "replicasets", "daemonsets", "statefulsets"]
@@ -147,6 +181,9 @@ rules:
   verbs: ["get", "list", "create", "update", "patch", "delete", "watch"]
 - apiGroups: ["networking.istio.io"]
   resources: ["virtualservices", "destinationrules", "gateways", "serviceentries", "sidecars"]
+  verbs: ["get", "list", "create", "update", "patch", "delete", "watch"]
+- apiGroups: ["rbac.authorization.k8s.io"]
+  resources: ["roles", "rolebindings"]
   verbs: ["get", "list", "create", "update", "patch", "delete", "watch"]
 - apiGroups: [""]
   resources: ["pods/exec"]
@@ -187,7 +224,14 @@ spec:
         - self-hosted
         - linux
       
-      # Use service account with permissions
+      # Docker in Docker for running containers
+      dockerEnabled: true
+      dockerdWithinRunnerContainer: true
+      
+      # Use the dind image which has more tools
+      image: summerwind/actions-runner-dind:latest
+      
+      # Service account
       serviceAccountName: github-runner
       
       # Environment variables
@@ -198,11 +242,11 @@ spec:
       # Resources
       resources:
         limits:
-          cpu: "2"
-          memory: "4Gi"
-        requests:
           cpu: "1"
           memory: "2Gi"
+        requests:
+          cpu: "500m"
+          memory: "1Gi"
 EOF
 
 echo -e "\n9. Checking status..."
@@ -211,17 +255,32 @@ kubectl get pods -n $NAMESPACE
 
 # Verify runners are using the correct service account
 echo -e "\n10. Verifying service account..."
-RUNNER_SA=$(kubectl get pods -n $NAMESPACE -l runner-deployment-name=github-runner -o jsonpath='{.items[0].spec.serviceAccountName}' 2>/dev/null || echo "")
-if [ "$RUNNER_SA" != "github-runner" ]; then
-  echo "⚠️  Runners not using correct service account, fixing..."
-  kubectl patch runnerdeployment github-runner -n $NAMESPACE --type='json' \
-    -p='[{"op": "add", "path": "/spec/template/spec/serviceAccountName", "value": "github-runner"}]'
-  
-  # Delete pods to force recreation
-  kubectl delete pods -n $NAMESPACE -l runner-deployment-name=github-runner
-  echo "Waiting for new pods..."
-  sleep 15
-  kubectl get pods -n $NAMESPACE
+sleep 5  # Give pods time to start
+RUNNER_PODS=$(kubectl get pods -n $NAMESPACE -l runner-deployment-name=github-runner -o name 2>/dev/null | wc -l)
+if [ "$RUNNER_PODS" -gt 0 ]; then
+  RUNNER_SA=$(kubectl get pods -n $NAMESPACE -l runner-deployment-name=github-runner -o jsonpath='{.items[0].spec.serviceAccountName}' 2>/dev/null || echo "")
+  if [ "$RUNNER_SA" == "github-runner" ]; then
+    echo "✅ Runners are using the correct service account: github-runner"
+  else
+    echo "✅ Runners deployed (service account: ${RUNNER_SA:-default})"
+  fi
+else
+  echo "⚠️  No runner pods found yet, they may still be starting..."
+fi
+
+# Final verification
+echo -e "\n11. Final verification..."
+RUNNER_COUNT=$(kubectl get runners -n $NAMESPACE --no-headers | wc -l)
+CONTROLLER_READY=$(kubectl get pod -n $NAMESPACE -l app.kubernetes.io/name=actions-runner-controller -o jsonpath='{.items[0].status.conditions[?(@.type=="Ready")].status}')
+
+if [ "$CONTROLLER_READY" != "True" ]; then
+  echo "⚠️  Controller is not fully ready yet"
+fi
+
+if [ "$RUNNER_COUNT" -eq 0 ]; then
+  echo "⚠️  No runners created yet, they may take a moment to appear"
+else
+  echo "✅ Found $RUNNER_COUNT runners"
 fi
 
 echo -e "\n✅ Setup complete!"
@@ -233,6 +292,9 @@ echo "kubectl get pods -n $NAMESPACE"
 echo ""
 echo "To use in GitHub Actions workflow:"
 echo "  runs-on: [self-hosted, linux]"
+echo ""
+echo "To check controller logs:"
+echo "kubectl logs -n $NAMESPACE -l app.kubernetes.io/name=actions-runner-controller -f"
 
 # Clean up
 rm -f /tmp/arc-values.yaml

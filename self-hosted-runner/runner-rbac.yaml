@@ -23,7 +23,7 @@ rules:
 
 # Core resources
 - apiGroups: [""]
-  resources: ["pods", "services", "configmaps", "secrets"]
+  resources: ["pods", "services", "configmaps", "secrets", "serviceaccounts"]
   verbs: ["get", "list", "create", "update", "patch", "delete", "watch"]
 
 # Deployment resources
@@ -34,6 +34,11 @@ rules:
 # Job resources
 - apiGroups: ["batch"]
   resources: ["jobs", "cronjobs"]
+  verbs: ["get", "list", "create", "update", "patch", "delete", "watch"]
+
+# RBAC resources
+- apiGroups: ["rbac.authorization.k8s.io"]
+  resources: ["roles", "rolebindings", "clusterroles", "clusterrolebindings"]
   verbs: ["get", "list", "create", "update", "patch", "delete", "watch"]
 
 # Istio resources
