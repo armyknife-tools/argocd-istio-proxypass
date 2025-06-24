@@ -5,6 +5,8 @@ kind: Kustomization
 # VirtualService is deployed in the same namespace
 
 resources:
+  # ArgoCD hook to label namespace with istio-injection=enabled
+  - namespace-job.yaml
   - traffic-collector.yaml
   - passthrough-proxy.yaml
   - proxy-configmap.yaml

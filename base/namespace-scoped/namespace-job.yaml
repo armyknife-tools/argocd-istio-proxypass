@@ -1,0 +1,60 @@
+# Job to label the namespace with istio-injection=enabled
+# This runs before other resources are created
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: namespace-labeler
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+    argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
+spec:
+  template:
+    spec:
+      serviceAccountName: namespace-labeler
+      restartPolicy: Never
+      containers:
+      - name: kubectl
+        image: bitnami/kubectl:latest
+        command:
+        - /bin/sh
+        - -c
+        - |
+          # Get current namespace from pod
+          NAMESPACE=$(cat /var/run/secrets/kubernetes.io/serviceaccount/namespace)
+          echo "Labeling namespace $NAMESPACE with istio-injection=enabled"
+          kubectl label namespace $NAMESPACE istio-injection=enabled --overwrite
+---
+# ServiceAccount for the job
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: namespace-labeler
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+---
+# Role to allow labeling namespace
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: namespace-labeler
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+rules:
+- apiGroups: [""]
+  resources: ["namespaces"]
+  verbs: ["get", "patch", "update"]
+---
+# RoleBinding
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: namespace-labeler
+  annotations:
+    argocd.argoproj.io/hook: PreSync
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: namespace-labeler
+subjects:
+- kind: ServiceAccount
+  name: namespace-labeler
