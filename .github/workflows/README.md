@@ -1,59 +1,41 @@
 # GitHub Actions Workflows
 
-This directory contains CI/CD workflows for the Istio Traffic Capture solution.
+This directory contains the production CI/CD workflow for the Istio Traffic Capture solution using self-hosted runners.
 
-## Available Workflows
+## Production Workflow
 
-### 1. Deploy Traffic Capture (`deploy-traffic-capture.yml`)
-- **Trigger**: Push to main or manual dispatch
-- **Purpose**: Deploy to dev/staging/prod environments via ArgoCD
-- **Features**: Automated namespace labeling, health checks, verification
+### Deploy via Self-Hosted Runner (`deploy-self-hosted.yml`)
+- **Trigger**: 
+  - Push to main (auto-creates preview environment)
+  - Manual dispatch (for dev/staging/prod deployments)
+- **Purpose**: Deploy traffic capture solution via ArgoCD
+- **Runner**: Self-hosted runner inside the Kubernetes cluster
+- **Security**: No cluster credentials needed in GitHub
 
-### 2. Test Traffic Capture (`test-traffic-capture.yml`)
-- **Trigger**: Pull requests or manual dispatch
-- **Purpose**: Run automated tests on PR changes
-- **Features**: Creates temporary namespace, runs tests, cleans up
+## How It Works
 
-### 3. Quick Test (`quick-test.yml`)
-- **Trigger**: Manual dispatch only
-- **Purpose**: Quick deployment and testing
-- **Features**: Simple one-click test deployment
+1. **Automatic Deployments**: Every push to main creates a preview environment with namespace `traffic-capture-auto-<commit-sha>`
+2. **Manual Deployments**: Use workflow dispatch to deploy to specific environments (dev/staging/prod)
+3. **ArgoCD Integration**: Creates ArgoCD applications for GitOps management
+4. **Self-Hosted Runner**: Runs inside the cluster with proper RBAC permissions
 
-## Required Secrets
-
-Configure these in your GitHub repository settings:
-
-```bash
-# ArgoCD server (without https://)
-ARGOCD_SERVER: argocd.example.com
-
-# ArgoCD authentication token
-ARGOCD_TOKEN: <your-argocd-token>
-
-# Base64 encoded kubeconfig
-KUBECONFIG: <base64-encoded-kubeconfig>
-```
-
-## Usage Examples
+## Usage
 
 ### Manual Deployment
-1. Go to Actions → Deploy Traffic Capture
+1. Go to Actions → Deploy via Self-Hosted Runner
 2. Click "Run workflow"
 3. Fill in:
    - Environment: dev/staging/prod
-   - Namespace: your-namespace
-   - Cluster: (optional)
+   - Namespace: target namespace name
 
-### Quick Test
-1. Go to Actions → Quick Test
-2. Click "Run workflow"
-3. Enter namespace name
-4. View results in the workflow run
+### Automatic Preview
+- Just push to main branch
+- A preview environment will be created automatically
 
-## Key Features
+## No Secrets Required!
 
-- **Automated Istio Injection**: PreSync hook automatically labels namespace
-- **No Manual Steps**: Fully automated deployment
-- **Multi-Environment**: Support for dev, staging, and production
-- **Health Verification**: Automatic health checks and sidecar verification
-- **Test Coverage**: Validates traffic capture and data masking
+This workflow uses a self-hosted runner inside the cluster, so:
+- ✅ No KUBECONFIG needed
+- ✅ No ARGOCD_TOKEN in GitHub secrets
+- ✅ No cluster endpoints exposed
+- ✅ Direct cluster access via service accounts

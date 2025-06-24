@@ -221,7 +221,7 @@ metadata:
   name: github-runner
   namespace: $NAMESPACE
 spec:
-  replicas: 2
+  replicas: 1
   template:
     spec:
       repository: $REPO
@@ -244,14 +244,14 @@ spec:
       - name: RUNNER_FEATURE_FLAG_EPHEMERAL
         value: "true"
       
-      # Resources
+      # Minimal resources for resource-constrained clusters
       resources:
         limits:
-          cpu: "1"
-          memory: "2Gi"
-        requests:
           cpu: "500m"
           memory: "1Gi"
+        requests:
+          cpu: "100m"
+          memory: "256Mi"
 EOF
 
 echo -e "\n9. Checking status..."
