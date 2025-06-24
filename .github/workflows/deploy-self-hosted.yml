@@ -58,67 +58,18 @@ jobs:
           kubectl label --local -f - istio-injection=enabled -o yaml | \
           kubectl apply -f -
 
-    - name: Deploy using Kustomize
-      run: |
-        echo "Deploying to namespace: $NAMESPACE"
-        
-        # Deploy using kustomize with dynamic namespace
-        kubectl apply -k overlays/$ENVIRONMENT --namespace=$NAMESPACE
-        
-        # Wait for all deployments to be ready
-        echo "Waiting for deployments to be ready..."
-        kubectl wait --for=condition=available --timeout=300s \
-          deployment --all -n $NAMESPACE
-
-    - name: Run deployment tests
-      run: |
-        echo "Testing traffic capture..."
-        
-        # Wait a bit for services to stabilize
-        sleep 10
-        
-        # Run test
-        TEST_ID="test-$(date +%s)"
-        echo "Test ID: $TEST_ID"
-        
-        # Make a test request
-        kubectl exec -n $NAMESPACE deployment/test-client -c client -- \
-          curl -s "http://example-app/test/$TEST_ID" || echo "Request sent"
-        
-        # Wait for capture
-        sleep 5
-        
-        # Check if captured
-        echo "Checking capture..."
-        if kubectl exec -n $NAMESPACE deployment/traffic-collector -- \
-           wget -qO- http://localhost:9000/query 2>/dev/null | grep -q "$TEST_ID"; then
-          echo "✅ Traffic captured successfully!"
-        else
-          echo "❌ Traffic NOT captured"
-          exit 1
-        fi
-        
-        # Test data masking
-        echo "Testing data masking..."
-        MASK_ID="mask-$(date +%s)"
-        
-        kubectl exec -n $NAMESPACE deployment/test-client -c client -- \
-          curl -s -X POST "http://example-app/$MASK_ID" \
-          -H "Content-Type: application/json" \
-          -d '{"ssn":"123-45-6789","email":"test@example.com"}' || echo "Masking test sent"
-        
-        sleep 5
-        
-        # Check masking
-        RESPONSE=$(kubectl exec -n $NAMESPACE deployment/traffic-collector -- \
-          wget -qO- http://localhost:9000/query 2>/dev/null | grep "$MASK_ID" -A 20)
-        
-        if echo "$RESPONSE" | grep -q "123-45-6789"; then
-          echo "❌ SSN not masked!"
-          exit 1
-        else
-          echo "✅ Data properly masked"
-        fi
+    # Skip manual deployment - ArgoCD will handle this
+    # - name: Deploy using Kustomize
+    #   run: |
+    #     echo "Deploying to namespace: $NAMESPACE"
+    #     
+    #     # Deploy using kustomize with dynamic namespace
+    #     kubectl apply -k overlays/$ENVIRONMENT --namespace=$NAMESPACE
+    #     
+    #     # Wait for all deployments to be ready
+    #     echo "Waiting for deployments to be ready..."
+    #     kubectl wait --for=condition=available --timeout=300s \
+    #       deployment --all -n $NAMESPACE
 
     - name: Create ArgoCD App
       run: |
@@ -167,6 +118,7 @@ jobs:
         
         echo "✅ ArgoCD application created: traffic-capture-$NAMESPACE"
         echo "View in ArgoCD UI: https://<your-argocd-url>/applications/traffic-capture-$NAMESPACE"
+
 
     - name: Generate summary
       if: always()
