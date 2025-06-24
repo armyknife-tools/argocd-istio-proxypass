@@ -9,9 +9,11 @@ spec:
   gateways:
   - mesh
   hosts:
-  # This will match all services in the current namespace
-  - "*.svc.cluster.local"
+  # Only match services WITHOUT a namespace qualifier
+  # This ensures we only capture traffic within the same namespace
+  - "*"
   http:
+  # Skip if already forwarded by proxy (prevent loops)
   - match:
     - headers:
         x-forwarded-by:
@@ -21,6 +23,19 @@ spec:
         host: passthrough-proxy
         port:
           number: 8080
+  # Skip certain services even within namespace
+  - match:
+    - uri:
+        prefix: "/"
+      headers:
+        host:
+          regex: "^(passthrough-proxy|traffic-collector|istio-.*|kube-.*)"
+    route:
+    - destination:
+        host: passthrough-proxy
+        port:
+          number: 8080
+  # Route all other in-namespace traffic through proxy
   - route:
     - destination:
         host: passthrough-proxy
