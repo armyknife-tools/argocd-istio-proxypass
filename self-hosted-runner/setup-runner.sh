@@ -115,7 +115,60 @@ kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=actions-runner-
 
 # Step 6: Apply RBAC for runners
 echo -e "\n7. Applying RBAC..."
-kubectl apply -f runner-rbac.yaml 2>/dev/null || echo "RBAC will be applied when runner-rbac.yaml is available"
+# Check if runner-rbac.yaml exists in current directory
+if [ -f "runner-rbac.yaml" ]; then
+  kubectl apply -f runner-rbac.yaml
+else
+  echo "Creating RBAC resources inline..."
+  # Create RBAC inline if file doesn't exist
+  kubectl apply -f - <<'RBAC'
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: github-runner
+  namespace: actions-runner-system
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: github-runner-deployer
+rules:
+- apiGroups: [""]
+  resources: ["namespaces"]
+  verbs: ["get", "list", "create", "patch", "update"]
+- apiGroups: [""]
+  resources: ["pods", "services", "configmaps", "secrets"]
+  verbs: ["get", "list", "create", "update", "patch", "delete", "watch"]
+- apiGroups: ["apps"]
+  resources: ["deployments", "replicasets", "daemonsets", "statefulsets"]
+  verbs: ["get", "list", "create", "update", "patch", "delete", "watch"]
+- apiGroups: ["batch"]
+  resources: ["jobs", "cronjobs"]
+  verbs: ["get", "list", "create", "update", "patch", "delete", "watch"]
+- apiGroups: ["networking.istio.io"]
+  resources: ["virtualservices", "destinationrules", "gateways", "serviceentries", "sidecars"]
+  verbs: ["get", "list", "create", "update", "patch", "delete", "watch"]
+- apiGroups: [""]
+  resources: ["pods/exec"]
+  verbs: ["create"]
+- apiGroups: [""]
+  resources: ["pods/log"]
+  verbs: ["get", "list"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: github-runner-deployer
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: github-runner-deployer
+subjects:
+- kind: ServiceAccount
+  name: github-runner
+  namespace: actions-runner-system
+RBAC
+fi
 
 # Step 7: Create runner deployment
 echo -e "\n8. Creating runner deployment..."
@@ -155,6 +208,21 @@ EOF
 echo -e "\n9. Checking status..."
 sleep 10
 kubectl get pods -n $NAMESPACE
+
+# Verify runners are using the correct service account
+echo -e "\n10. Verifying service account..."
+RUNNER_SA=$(kubectl get pods -n $NAMESPACE -l runner-deployment-name=github-runner -o jsonpath='{.items[0].spec.serviceAccountName}' 2>/dev/null || echo "")
+if [ "$RUNNER_SA" != "github-runner" ]; then
+  echo "⚠️  Runners not using correct service account, fixing..."
+  kubectl patch runnerdeployment github-runner -n $NAMESPACE --type='json' \
+    -p='[{"op": "add", "path": "/spec/template/spec/serviceAccountName", "value": "github-runner"}]'
+  
+  # Delete pods to force recreation
+  kubectl delete pods -n $NAMESPACE -l runner-deployment-name=github-runner
+  echo "Waiting for new pods..."
+  sleep 15
+  kubectl get pods -n $NAMESPACE
+fi
 
 echo -e "\n✅ Setup complete!"
 echo "Controller namespace: $NAMESPACE"
