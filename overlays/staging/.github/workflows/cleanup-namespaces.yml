@@ -1,0 +1,135 @@
+name: Cleanup Test Namespaces
+
+on:
+  schedule:
+    # Run daily at 2 AM UTC
+    - cron: '0 2 * * *'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (show what would be deleted)'
+        required: false
+        default: 'false'
+        type: choice
+        options:
+          - 'true'
+          - 'false'
+      age_hours:
+        description: 'Delete namespaces older than (hours)'
+        required: false
+        default: '24'
+        type: string
+
+jobs:
+  cleanup:
+    name: Cleanup old test namespaces
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up kubectl
+      run: |
+        curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+        chmod +x kubectl
+        sudo mv kubectl /usr/local/bin/
+
+    - name: Configure kubectl
+      run: |
+        echo "${{ secrets.KUBECONFIG }}" | base64 -d > /tmp/kubeconfig
+        export KUBECONFIG=/tmp/kubeconfig
+
+    - name: Find and cleanup old namespaces
+      run: |
+        export KUBECONFIG=/tmp/kubeconfig
+        
+        DRY_RUN="${{ github.event.inputs.dry_run || 'false' }}"
+        AGE_HOURS="${{ github.event.inputs.age_hours || '24' }}"
+        
+        echo "## Namespace Cleanup Report" >> $GITHUB_STEP_SUMMARY
+        echo "- **Dry Run**: $DRY_RUN" >> $GITHUB_STEP_SUMMARY
+        echo "- **Age Threshold**: $AGE_HOURS hours" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        # Find namespaces matching our test patterns
+        NAMESPACES=$(kubectl get namespaces -o json | jq -r '.items[] | select(.metadata.name | test("^traffic-capture-(test|pr|auto)-.*")) | .metadata.name')
+        
+        echo "### Namespaces Found" >> $GITHUB_STEP_SUMMARY
+        echo '```' >> $GITHUB_STEP_SUMMARY
+        
+        DELETED_COUNT=0
+        KEPT_COUNT=0
+        
+        for NS in $NAMESPACES; do
+          # Get namespace creation time
+          CREATED=$(kubectl get namespace $NS -o jsonpath='{.metadata.creationTimestamp}')
+          CREATED_EPOCH=$(date -d "$CREATED" +%s)
+          CURRENT_EPOCH=$(date +%s)
+          AGE_HOURS_ACTUAL=$(( ($CURRENT_EPOCH - $CREATED_EPOCH) / 3600 ))
+          
+          echo -n "$NS (age: ${AGE_HOURS_ACTUAL}h) - " >> $GITHUB_STEP_SUMMARY
+          
+          if [ $AGE_HOURS_ACTUAL -gt $AGE_HOURS ]; then
+            if [ "$DRY_RUN" == "true" ]; then
+              echo "Would delete" >> $GITHUB_STEP_SUMMARY
+            else
+              kubectl delete namespace $NS --wait=false
+              echo "Deleted" >> $GITHUB_STEP_SUMMARY
+            fi
+            DELETED_COUNT=$((DELETED_COUNT + 1))
+          else
+            echo "Keeping (too new)" >> $GITHUB_STEP_SUMMARY
+            KEPT_COUNT=$((KEPT_COUNT + 1))
+          fi
+        done
+        
+        echo '```' >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Summary" >> $GITHUB_STEP_SUMMARY
+        echo "- **Deleted**: $DELETED_COUNT namespaces" >> $GITHUB_STEP_SUMMARY
+        echo "- **Kept**: $KEPT_COUNT namespaces" >> $GITHUB_STEP_SUMMARY
+
+    - name: Cleanup ArgoCD applications
+      run: |
+        export KUBECONFIG=/tmp/kubeconfig
+        
+        # Install ArgoCD CLI
+        curl -sSL -o /usr/local/bin/argocd https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
+        chmod +x /usr/local/bin/argocd
+        
+        # Login to ArgoCD
+        argocd login ${{ secrets.ARGOCD_SERVER }} --auth-token ${{ secrets.ARGOCD_TOKEN }} --grpc-web || {
+          echo "ArgoCD login failed, skipping app cleanup"
+          exit 0
+        }
+        
+        # Find and delete orphaned ArgoCD apps
+        DRY_RUN="${{ github.event.inputs.dry_run || 'false' }}"
+        
+        echo "### ArgoCD Application Cleanup" >> $GITHUB_STEP_SUMMARY
+        echo '```' >> $GITHUB_STEP_SUMMARY
+        
+        APPS=$(argocd app list -o json | jq -r '.[] | select(.metadata.name | test("^traffic-capture-.*")) | .metadata.name')
+        
+        for APP in $APPS; do
+          # Check if namespace still exists
+          NAMESPACE=$(argocd app get $APP -o json | jq -r '.spec.destination.namespace')
+          
+          if ! kubectl get namespace $NAMESPACE >/dev/null 2>&1; then
+            echo -n "$APP (namespace $NAMESPACE missing) - " >> $GITHUB_STEP_SUMMARY
+            if [ "$DRY_RUN" == "true" ]; then
+              echo "Would delete" >> $GITHUB_STEP_SUMMARY
+            else
+              argocd app delete $APP --cascade --yes
+              echo "Deleted" >> $GITHUB_STEP_SUMMARY
+            fi
+          fi
+        done
+        
+        echo '```' >> $GITHUB_STEP_SUMMARY
+
+    - name: Cleanup
+      if: always()
+      run: |
+        rm -f /tmp/kubeconfig

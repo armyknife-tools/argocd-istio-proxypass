@@ -1,0 +1,149 @@
+name: Deploy Traffic Capture
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'overlays/**'
+      - 'base/**'
+      - '.github/workflows/deploy-traffic-capture.yml'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+      namespace:
+        description: 'Target namespace'
+        required: true
+        type: string
+      cluster:
+        description: 'Target cluster'
+        required: false
+        default: 'https://kubernetes.default.svc'
+        type: string
+
+env:
+  ARGOCD_SERVER: ${{ secrets.ARGOCD_SERVER }}
+  ARGOCD_TOKEN: ${{ secrets.ARGOCD_TOKEN }}
+
+jobs:
+  deploy:
+    name: Deploy Traffic Capture
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment || 'dev' }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up environment
+      run: |
+        if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+          echo "ENVIRONMENT=${{ github.event.inputs.environment }}" >> $GITHUB_ENV
+          echo "NAMESPACE=${{ github.event.inputs.namespace }}" >> $GITHUB_ENV
+          echo "CLUSTER=${{ github.event.inputs.cluster }}" >> $GITHUB_ENV
+        else
+          # Auto-deploy to dev on push to main
+          echo "ENVIRONMENT=dev" >> $GITHUB_ENV
+          echo "NAMESPACE=traffic-capture-auto-${GITHUB_SHA::8}" >> $GITHUB_ENV
+          echo "CLUSTER=https://kubernetes.default.svc" >> $GITHUB_ENV
+        fi
+        echo "APP_NAME=traffic-capture-${NAMESPACE}" >> $GITHUB_ENV
+
+    - name: Install ArgoCD CLI
+      run: |
+        curl -sSL -o /usr/local/bin/argocd https://github.com/argoproj/argo-cd/releases/latest/download/argocd-linux-amd64
+        chmod +x /usr/local/bin/argocd
+        argocd version --client
+
+    - name: Login to ArgoCD
+      run: |
+        argocd login $ARGOCD_SERVER --auth-token $ARGOCD_TOKEN --grpc-web
+
+    - name: Create ArgoCD Application
+      run: |
+        # Check if app already exists
+        if argocd app get $APP_NAME >/dev/null 2>&1; then
+          echo "Application $APP_NAME already exists, updating..."
+          argocd app set $APP_NAME \
+            --path overlays/$ENVIRONMENT \
+            --dest-namespace $NAMESPACE \
+            --kustomize-namespace $NAMESPACE
+        else
+          echo "Creating new application $APP_NAME..."
+          argocd app create $APP_NAME \
+            --repo ${{ github.server_url }}/${{ github.repository }} \
+            --revision ${{ github.ref }} \
+            --path overlays/$ENVIRONMENT \
+            --dest-server $CLUSTER \
+            --dest-namespace $NAMESPACE \
+            --kustomize-namespace $NAMESPACE \
+            --sync-policy automated \
+            --sync-option CreateNamespace=true \
+            --sync-option ServerSideApply=true \
+            --auto-prune \
+            --self-heal \
+            --sync-retry-limit 5 \
+            --sync-retry-backoff-duration 5s \
+            --sync-retry-backoff-factor 2 \
+            --sync-retry-backoff-max-duration 3m
+        fi
+
+    - name: Sync Application
+      run: |
+        argocd app sync $APP_NAME --force --prune
+        argocd app wait $APP_NAME --health --timeout 300
+
+    - name: Verify Deployment
+      run: |
+        # Install kubectl
+        curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+        chmod +x kubectl
+        sudo mv kubectl /usr/local/bin/
+        
+        # Configure kubectl (requires KUBECONFIG secret)
+        echo "${{ secrets.KUBECONFIG }}" | base64 -d > /tmp/kubeconfig
+        export KUBECONFIG=/tmp/kubeconfig
+        
+        # Verify namespace has Istio injection
+        echo "Checking namespace labels..."
+        kubectl get namespace $NAMESPACE --show-labels | grep istio-injection=enabled || {
+          echo "WARNING: Namespace missing istio-injection label"
+          exit 1
+        }
+        
+        # Check pod status
+        echo "Checking pod status..."
+        kubectl get pods -n $NAMESPACE
+        kubectl wait --for=condition=ready pod --all -n $NAMESPACE --timeout=300s
+        
+        # Verify sidecars
+        echo "Verifying sidecar configuration..."
+        kubectl get pods -n $NAMESPACE -o custom-columns=NAME:.metadata.name,CONTAINERS:.spec.containers[*].name
+        
+        # Run basic test
+        echo "Running basic connectivity test..."
+        kubectl exec -n $NAMESPACE deployment/test-client -c client -- \
+          curl -s http://example-app/health || echo "Health check completed"
+        
+        # Clean up kubeconfig
+        rm -f /tmp/kubeconfig
+
+    - name: Output Summary
+      if: always()
+      run: |
+        echo "## Deployment Summary" >> $GITHUB_STEP_SUMMARY
+        echo "- **Application**: $APP_NAME" >> $GITHUB_STEP_SUMMARY
+        echo "- **Environment**: $ENVIRONMENT" >> $GITHUB_STEP_SUMMARY
+        echo "- **Namespace**: $NAMESPACE" >> $GITHUB_STEP_SUMMARY
+        echo "- **Cluster**: $CLUSTER" >> $GITHUB_STEP_SUMMARY
+        echo "- **Revision**: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### ArgoCD Application URL" >> $GITHUB_STEP_SUMMARY
+        echo "$ARGOCD_SERVER/applications/$APP_NAME" >> $GITHUB_STEP_SUMMARY

@@ -1,0 +1,11 @@
+# Staging environment patches
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: proxy-config
+data:
+  sampling_rate: "0.5"  # 50% capture for staging
+  collector_url: "http://traffic-collector:9000/collect"
+  max_body_size: "8192"  # Standard size for staging
+  mask_sensitive_data: "true"
