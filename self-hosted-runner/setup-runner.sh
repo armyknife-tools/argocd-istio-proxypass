@@ -150,7 +150,12 @@ echo "✅ Controller is running: $CONTROLLER_POD"
 # Step 6: Apply RBAC for runners
 echo -e "\n7. Applying RBAC..."
 # Check if runner-rbac.yaml exists in current directory
-if [ -f "runner-rbac.yaml" ]; then
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+if [ -f "$SCRIPT_DIR/runner-rbac.yaml" ]; then
+  echo "Applying RBAC from runner-rbac.yaml..."
+  kubectl apply -f "$SCRIPT_DIR/runner-rbac.yaml"
+elif [ -f "runner-rbac.yaml" ]; then
+  echo "Applying RBAC from local runner-rbac.yaml..."
   kubectl apply -f runner-rbac.yaml
 else
   echo "Creating RBAC resources inline..."
