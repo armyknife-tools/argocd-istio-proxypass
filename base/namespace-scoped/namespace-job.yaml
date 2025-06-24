@@ -9,6 +9,9 @@ metadata:
     argocd.argoproj.io/hook-delete-policy: BeforeHookCreation
 spec:
   template:
+    metadata:
+      annotations:
+        sidecar.istio.io/inject: "false"
     spec:
       serviceAccountName: namespace-labeler
       restartPolicy: Never
