@@ -1,0 +1,174 @@
+name: Deploy Traffic Capture (Secure)
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'overlays/**'
+      - 'base/**'
+      - '.github/workflows/deploy-traffic-capture-secure.yml'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+      namespace:
+        description: 'Target namespace'
+        required: true
+        type: string
+
+jobs:
+  deploy:
+    name: Deploy Traffic Capture
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment || 'dev' }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up environment
+      run: |
+        if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+          echo "ENVIRONMENT=${{ github.event.inputs.environment }}" >> $GITHUB_ENV
+          echo "NAMESPACE=${{ github.event.inputs.namespace }}" >> $GITHUB_ENV
+        else
+          # Auto-deploy to dev on push to main
+          echo "ENVIRONMENT=dev" >> $GITHUB_ENV
+          echo "NAMESPACE=traffic-capture-auto-${GITHUB_SHA::8}" >> $GITHUB_ENV
+        fi
+
+    - name: Set up kubectl
+      uses: azure/setup-kubectl@v3
+      with:
+        version: 'latest'
+
+    - name: Configure kubectl
+      run: |
+        # Decode kubeconfig from secret
+        echo "${{ secrets.KUBECONFIG }}" | base64 -d > /tmp/kubeconfig
+        echo "KUBECONFIG=/tmp/kubeconfig" >> $GITHUB_ENV
+        
+        # Verify connection
+        kubectl version --client
+        kubectl cluster-info
+
+    - name: Create namespace with Istio injection
+      run: |
+        # Create namespace if it doesn't exist
+        kubectl create namespace $NAMESPACE --dry-run=client -o yaml | kubectl apply -f -
+        
+        # Label for Istio injection
+        kubectl label namespace $NAMESPACE istio-injection=enabled --overwrite
+        
+        echo "Namespace $NAMESPACE created with Istio injection enabled"
+
+    - name: Deploy using Kustomize
+      run: |
+        # Deploy the application using kustomize
+        echo "Deploying to namespace: $NAMESPACE"
+        
+        # Apply the kustomization with namespace override
+        kubectl apply -k overlays/$ENVIRONMENT -n $NAMESPACE
+        
+        # Wait for deployments to be ready
+        echo "Waiting for deployments..."
+        kubectl wait --for=condition=available --timeout=300s deployment --all -n $NAMESPACE
+
+    - name: Verify deployment
+      run: |
+        echo "## Deployment Status" >> $GITHUB_STEP_SUMMARY
+        echo "**Namespace:** $NAMESPACE" >> $GITHUB_STEP_SUMMARY
+        echo "**Environment:** $ENVIRONMENT" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        # Check pods
+        echo "### Pods" >> $GITHUB_STEP_SUMMARY
+        echo '```' >> $GITHUB_STEP_SUMMARY
+        kubectl get pods -n $NAMESPACE >> $GITHUB_STEP_SUMMARY
+        echo '```' >> $GITHUB_STEP_SUMMARY
+        
+        # Verify sidecars
+        echo "### Sidecar Configuration" >> $GITHUB_STEP_SUMMARY
+        echo '```' >> $GITHUB_STEP_SUMMARY
+        kubectl get pods -n $NAMESPACE -o custom-columns=NAME:.metadata.name,CONTAINERS:.spec.containers[*].name >> $GITHUB_STEP_SUMMARY
+        echo '```' >> $GITHUB_STEP_SUMMARY
+
+    - name: Run tests
+      run: |
+        # Wait for all pods to be ready
+        kubectl wait --for=condition=ready pod --all -n $NAMESPACE --timeout=120s
+        
+        echo "### Test Results" >> $GITHUB_STEP_SUMMARY
+        
+        # Test 1: Basic connectivity
+        echo "Testing basic connectivity..."
+        TEST_ID="gha-test-$(date +%s)"
+        
+        if kubectl exec -n $NAMESPACE deployment/test-client -c client -- \
+          curl -s "http://example-app/test/$TEST_ID" > /dev/null 2>&1; then
+          echo "✅ Basic connectivity test passed" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "❌ Basic connectivity test failed" >> $GITHUB_STEP_SUMMARY
+          exit 1
+        fi
+        
+        # Wait for capture
+        sleep 3
+        
+        # Test 2: Verify capture
+        echo "Verifying traffic capture..."
+        if kubectl exec -n $NAMESPACE deployment/traffic-collector -- \
+          wget -qO- http://localhost:9000/query 2>/dev/null | grep -q "$TEST_ID"; then
+          echo "✅ Traffic capture verified" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "❌ Traffic capture not working" >> $GITHUB_STEP_SUMMARY
+          exit 1
+        fi
+        
+        # Test 3: Sensitive data masking
+        echo "Testing sensitive data masking..."
+        MASK_ID="mask-$(date +%s)"
+        kubectl exec -n $NAMESPACE deployment/test-client -c client -- \
+          curl -s -X POST "http://example-app/$MASK_ID" \
+          -H "Content-Type: application/json" \
+          -d '{"ssn":"123-45-6789","creditCard":"4111-1111-1111-1234"}' > /dev/null 2>&1
+        
+        sleep 3
+        
+        # Check masking
+        MASKED_DATA=$(kubectl exec -n $NAMESPACE deployment/traffic-collector -- \
+          wget -qO- http://localhost:9000/query 2>/dev/null | grep "$MASK_ID" -A 20)
+        
+        if echo "$MASKED_DATA" | grep -q "123-45-6789"; then
+          echo "❌ Sensitive data NOT masked" >> $GITHUB_STEP_SUMMARY
+          exit 1
+        else
+          echo "✅ Sensitive data properly masked" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        # Get collector stats
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Collector Statistics" >> $GITHUB_STEP_SUMMARY
+        echo '```json' >> $GITHUB_STEP_SUMMARY
+        kubectl exec -n $NAMESPACE deployment/traffic-collector -- \
+          wget -qO- http://localhost:9000/stats 2>/dev/null >> $GITHUB_STEP_SUMMARY
+        echo '```' >> $GITHUB_STEP_SUMMARY
+
+    - name: Output summary
+      if: always()
+      run: |
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Deployment Info" >> $GITHUB_STEP_SUMMARY
+        echo "- **Commit:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+        echo "- **Time:** $(date)" >> $GITHUB_STEP_SUMMARY
+        echo "- **Triggered by:** ${{ github.actor }}" >> $GITHUB_STEP_SUMMARY
+        
+        # Cleanup kubeconfig
+        rm -f /tmp/kubeconfig

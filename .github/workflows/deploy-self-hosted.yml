@@ -1,0 +1,163 @@
+name: Deploy via Self-Hosted Runner
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'overlays/**'
+      - 'base/**'
+      - '.github/workflows/deploy-self-hosted.yml'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+      namespace:
+        description: 'Target namespace'
+        required: true
+        type: string
+
+jobs:
+  deploy:
+    name: Deploy Traffic Capture
+    runs-on: [self-hosted, linux]  # Use self-hosted runner
+    environment: ${{ github.event.inputs.environment || 'dev' }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up environment
+      run: |
+        if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+          echo "ENVIRONMENT=${{ github.event.inputs.environment }}" >> $GITHUB_ENV
+          echo "NAMESPACE=${{ github.event.inputs.namespace }}" >> $GITHUB_ENV
+        else
+          echo "ENVIRONMENT=dev" >> $GITHUB_ENV
+          echo "NAMESPACE=traffic-capture-auto-${GITHUB_SHA::8}" >> $GITHUB_ENV
+        fi
+
+    - name: Create namespace with Istio injection
+      run: |
+        echo "Creating namespace: $NAMESPACE"
+        kubectl create namespace $NAMESPACE --dry-run=client -o yaml | \
+          kubectl label --local -f - istio-injection=enabled -o yaml | \
+          kubectl apply -f -
+
+    - name: Deploy using Kustomize
+      run: |
+        echo "Deploying to namespace: $NAMESPACE"
+        
+        # Deploy using kustomize with dynamic namespace
+        kubectl apply -k overlays/$ENVIRONMENT --namespace=$NAMESPACE
+        
+        # Wait for all deployments to be ready
+        echo "Waiting for deployments to be ready..."
+        kubectl wait --for=condition=available --timeout=300s \
+          deployment --all -n $NAMESPACE
+
+    - name: Run deployment tests
+      run: |
+        echo "Testing traffic capture..."
+        
+        # Wait a bit for services to stabilize
+        sleep 10
+        
+        # Run test
+        TEST_ID="test-$(date +%s)"
+        echo "Test ID: $TEST_ID"
+        
+        # Make a test request
+        kubectl exec -n $NAMESPACE deployment/test-client -c client -- \
+          curl -s "http://example-app/test/$TEST_ID" || echo "Request sent"
+        
+        # Wait for capture
+        sleep 5
+        
+        # Check if captured
+        echo "Checking capture..."
+        if kubectl exec -n $NAMESPACE deployment/traffic-collector -- \
+           wget -qO- http://localhost:9000/query 2>/dev/null | grep -q "$TEST_ID"; then
+          echo "✅ Traffic captured successfully!"
+        else
+          echo "❌ Traffic NOT captured"
+          exit 1
+        fi
+        
+        # Test data masking
+        echo "Testing data masking..."
+        MASK_ID="mask-$(date +%s)"
+        
+        kubectl exec -n $NAMESPACE deployment/test-client -c client -- \
+          curl -s -X POST "http://example-app/$MASK_ID" \
+          -H "Content-Type: application/json" \
+          -d '{"ssn":"123-45-6789","email":"test@example.com"}' || echo "Masking test sent"
+        
+        sleep 5
+        
+        # Check masking
+        RESPONSE=$(kubectl exec -n $NAMESPACE deployment/traffic-collector -- \
+          wget -qO- http://localhost:9000/query 2>/dev/null | grep "$MASK_ID" -A 20)
+        
+        if echo "$RESPONSE" | grep -q "123-45-6789"; then
+          echo "❌ SSN not masked!"
+          exit 1
+        else
+          echo "✅ Data properly masked"
+        fi
+
+    - name: Create ArgoCD App (Optional)
+      if: github.event.inputs.environment == 'prod'
+      run: |
+        # For production, optionally create ArgoCD app for GitOps
+        echo "Note: ArgoCD deployment requires ARGOCD_TOKEN secret to be set"
+        echo "Skipping ArgoCD setup - deployment already done via kubectl"
+        
+        # If you want to use ArgoCD from the self-hosted runner:
+        # 1. Create a service account token for ArgoCD
+        # 2. Set it as ARGOCD_TOKEN secret in GitHub
+        # 3. Uncomment the code below:
+        
+        # if [ ! -z "${{ secrets.ARGOCD_TOKEN }}" ]; then
+        #   argocd app create traffic-capture-$NAMESPACE \
+        #     --server argocd-server.argocd.svc.cluster.local \
+        #     --insecure \
+        #     --auth-token "${{ secrets.ARGOCD_TOKEN }}" \
+        #     --repo "${{ github.server_url }}/${{ github.repository }}" \
+        #     --path "overlays/$ENVIRONMENT" \
+        #     --dest-server https://kubernetes.default.svc \
+        #     --dest-namespace $NAMESPACE \
+        #     --sync-policy automated \
+        #     --upsert
+        # fi
+
+    - name: Generate summary
+      if: always()
+      run: |
+        echo "## Deployment Summary" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "**Environment:** $ENVIRONMENT" >> $GITHUB_STEP_SUMMARY
+        echo "**Namespace:** $NAMESPACE" >> $GITHUB_STEP_SUMMARY
+        echo "**Commit:** ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+        echo "**Runner:** Self-hosted (in-cluster)" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        
+        if [ "${{ job.status }}" = "success" ]; then
+          echo "### ✅ Deployment Successful" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "#### Resources Deployed:" >> $GITHUB_STEP_SUMMARY
+          kubectl get all -n $NAMESPACE --no-headers | awk '{print "- " $1}' >> $GITHUB_STEP_SUMMARY
+        else
+          echo "### ❌ Deployment Failed" >> $GITHUB_STEP_SUMMARY
+        fi
+        
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "#### Security Note" >> $GITHUB_STEP_SUMMARY
+        echo "This deployment used a self-hosted runner inside the cluster." >> $GITHUB_STEP_SUMMARY
+        echo "No cluster credentials or endpoints are exposed in GitHub secrets! 🔒" >> $GITHUB_STEP_SUMMARY

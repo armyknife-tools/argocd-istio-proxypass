@@ -1,0 +1,175 @@
+name: Deploy via ArgoCD (Token Auth)
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - 'overlays/**'
+      - 'base/**'
+      - '.github/workflows/deploy-with-argocd-token.yml'
+  workflow_dispatch:
+    inputs:
+      environment:
+        description: 'Environment to deploy to'
+        required: true
+        type: choice
+        options:
+          - dev
+          - staging
+          - prod
+      namespace:
+        description: 'Target namespace'
+        required: true
+        type: string
+
+jobs:
+  deploy:
+    name: Deploy via ArgoCD
+    runs-on: ubuntu-latest
+    environment: ${{ github.event.inputs.environment || 'dev' }}
+    
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up environment
+      run: |
+        if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+          echo "ENVIRONMENT=${{ github.event.inputs.environment }}" >> $GITHUB_ENV
+          echo "NAMESPACE=${{ github.event.inputs.namespace }}" >> $GITHUB_ENV
+        else
+          echo "ENVIRONMENT=dev" >> $GITHUB_ENV
+          echo "NAMESPACE=traffic-capture-auto-${GITHUB_SHA::8}" >> $GITHUB_ENV
+        fi
+        echo "APP_NAME=traffic-capture-${NAMESPACE}" >> $GITHUB_ENV
+
+    - name: Install ArgoCD CLI
+      run: |
+        VERSION=$(curl --silent "https://api.github.com/repos/argoproj/argo-cd/releases/latest" | grep '"tag_name"' | sed -E 's/.*"([^"]+)".*/\1/')
+        curl -sSL -o /usr/local/bin/argocd https://github.com/argoproj/argo-cd/releases/download/$VERSION/argocd-linux-amd64
+        chmod +x /usr/local/bin/argocd
+
+    - name: Create ArgoCD App via API
+      env:
+        ARGOCD_AUTH_TOKEN: ${{ secrets.ARGOCD_TOKEN }}
+      run: |
+        # Use ArgoCD API directly to avoid exposing server endpoint
+        # This assumes ARGOCD_API_URL is set as a secret
+        
+        APP_MANIFEST=$(cat <<EOF
+        {
+          "metadata": {
+            "name": "$APP_NAME",
+            "namespace": "argocd"
+          },
+          "spec": {
+            "project": "default",
+            "source": {
+              "repoURL": "${{ github.server_url }}/${{ github.repository }}",
+              "targetRevision": "${{ github.ref }}",
+              "path": "overlays/$ENVIRONMENT",
+              "kustomize": {
+                "namespace": "$NAMESPACE"
+              }
+            },
+            "destination": {
+              "server": "https://kubernetes.default.svc",
+              "namespace": "$NAMESPACE"
+            },
+            "syncPolicy": {
+              "automated": {
+                "prune": true,
+                "selfHeal": true
+              },
+              "syncOptions": [
+                "CreateNamespace=true"
+              ]
+            }
+          }
+        }
+        EOF
+        )
+        
+        # Create or update app using API
+        echo "Creating ArgoCD application: $APP_NAME"
+        
+        # Check if app exists
+        STATUS_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+          -H "Authorization: Bearer $ARGOCD_AUTH_TOKEN" \
+          -H "Content-Type: application/json" \
+          "${{ secrets.ARGOCD_API_URL }}/api/v1/applications/$APP_NAME")
+        
+        if [ "$STATUS_CODE" = "200" ]; then
+          echo "App exists, updating..."
+          curl -X PUT \
+            -H "Authorization: Bearer $ARGOCD_AUTH_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$APP_MANIFEST" \
+            "${{ secrets.ARGOCD_API_URL }}/api/v1/applications/$APP_NAME"
+        else
+          echo "Creating new app..."
+          curl -X POST \
+            -H "Authorization: Bearer $ARGOCD_AUTH_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$APP_MANIFEST" \
+            "${{ secrets.ARGOCD_API_URL }}/api/v1/applications"
+        fi
+        
+        # Trigger sync
+        echo "Triggering sync..."
+        curl -X POST \
+          -H "Authorization: Bearer $ARGOCD_AUTH_TOKEN" \
+          -H "Content-Type: application/json" \
+          -d '{"revision":"'${{ github.sha }}'","prune":true}' \
+          "${{ secrets.ARGOCD_API_URL }}/api/v1/applications/$APP_NAME/sync"
+
+    - name: Wait for deployment
+      env:
+        ARGOCD_AUTH_TOKEN: ${{ secrets.ARGOCD_TOKEN }}
+      run: |
+        echo "Waiting for application to sync..."
+        
+        # Poll application status
+        for i in {1..60}; do
+          STATUS=$(curl -s \
+            -H "Authorization: Bearer $ARGOCD_AUTH_TOKEN" \
+            "${{ secrets.ARGOCD_API_URL }}/api/v1/applications/$APP_NAME" | \
+            jq -r '.status.sync.status')
+          
+          HEALTH=$(curl -s \
+            -H "Authorization: Bearer $ARGOCD_AUTH_TOKEN" \
+            "${{ secrets.ARGOCD_API_URL }}/api/v1/applications/$APP_NAME" | \
+            jq -r '.status.health.status')
+          
+          echo "Sync: $STATUS, Health: $HEALTH"
+          
+          if [ "$STATUS" = "Synced" ] && [ "$HEALTH" = "Healthy" ]; then
+            echo "Application deployed successfully!"
+            break
+          fi
+          
+          if [ $i -eq 60 ]; then
+            echo "Timeout waiting for deployment"
+            exit 1
+          fi
+          
+          sleep 5
+        done
+
+    - name: Generate summary
+      if: always()
+      run: |
+        echo "## Deployment Summary" >> $GITHUB_STEP_SUMMARY
+        echo "- **Application**: $APP_NAME" >> $GITHUB_STEP_SUMMARY
+        echo "- **Environment**: $ENVIRONMENT" >> $GITHUB_STEP_SUMMARY
+        echo "- **Namespace**: $NAMESPACE" >> $GITHUB_STEP_SUMMARY
+        echo "- **Commit**: ${{ github.sha }}" >> $GITHUB_STEP_SUMMARY
+        echo "" >> $GITHUB_STEP_SUMMARY
+        echo "### Deployment Status" >> $GITHUB_STEP_SUMMARY
+        
+        if [ "${{ job.status }}" = "success" ]; then
+          echo "✅ Deployment successful" >> $GITHUB_STEP_SUMMARY
+        else
+          echo "❌ Deployment failed" >> $GITHUB_STEP_SUMMARY
+        fi

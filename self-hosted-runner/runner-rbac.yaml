@@ -1,0 +1,85 @@
+# RBAC for GitHub Actions self-hosted runner
+# This gives the runner the permissions it needs to deploy
+
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: github-runner
+  namespace: actions-runner-system
+  annotations:
+    # Disable Istio sidecar injection for runner pods
+    sidecar.istio.io/inject: "false"
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: github-runner-deployer
+rules:
+# Namespace management
+- apiGroups: [""]
+  resources: ["namespaces"]
+  verbs: ["get", "list", "create", "patch", "update"]
+
+# Core resources
+- apiGroups: [""]
+  resources: ["pods", "services", "configmaps", "secrets"]
+  verbs: ["get", "list", "create", "update", "patch", "delete", "watch"]
+
+# Deployment resources
+- apiGroups: ["apps"]
+  resources: ["deployments", "replicasets", "daemonsets", "statefulsets"]
+  verbs: ["get", "list", "create", "update", "patch", "delete", "watch"]
+
+# Job resources
+- apiGroups: ["batch"]
+  resources: ["jobs", "cronjobs"]
+  verbs: ["get", "list", "create", "update", "patch", "delete", "watch"]
+
+# Istio resources
+- apiGroups: ["networking.istio.io"]
+  resources: ["virtualservices", "destinationrules", "gateways", "serviceentries", "sidecars"]
+  verbs: ["get", "list", "create", "update", "patch", "delete", "watch"]
+
+# ArgoCD resources (if needed)
+- apiGroups: ["argoproj.io"]
+  resources: ["applications", "appprojects"]
+  verbs: ["get", "list", "create", "update", "patch", "delete"]
+
+# Pod exec for testing
+- apiGroups: [""]
+  resources: ["pods/exec"]
+  verbs: ["create"]
+
+# Pod logs for debugging
+- apiGroups: [""]
+  resources: ["pods/log"]
+  verbs: ["get", "list"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: github-runner-deployer
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: github-runner-deployer
+subjects:
+- kind: ServiceAccount
+  name: github-runner
+  namespace: actions-runner-system
+
+---
+# Update the RunnerDeployment to use this ServiceAccount
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: runner-deployment-patch
+  namespace: actions-runner-system
+data:
+  patch.yaml: |
+    spec:
+      template:
+        spec:
+          serviceAccountName: github-runner
