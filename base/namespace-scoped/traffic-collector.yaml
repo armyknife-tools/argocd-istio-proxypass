@@ -1,0 +1,169 @@
+# Collector Service that receives captured traffic data (NO SIDECAR)
+apiVersion: v1
+kind: Service
+metadata:
+  name: traffic-collector
+spec:
+  ports:
+  - port: 9000
+    targetPort: 9000
+    name: http
+  selector:
+    app: traffic-collector
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: traffic-collector
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: traffic-collector
+  template:
+    metadata:
+      labels:
+        app: traffic-collector
+        sidecar.istio.io/inject: "false"  # NO SIDECAR for collector
+      annotations:
+        sidecar.istio.io/inject: "false"
+    spec:
+      containers:
+      - name: collector
+        image: node:16-alpine
+        command: ["/bin/sh"]
+        args:
+        - -c
+        - |
+          mkdir -p /app /data
+          cat > /app/collector.js << 'EOF'
+          const http = require('http');
+          const fs = require('fs');
+          
+          // In-memory storage (replace with database for production)
+          const captures = [];
+          const MAX_CAPTURES = 10000;
+          
+          const server = http.createServer((req, res) => {
+            if (req.method === 'POST' && req.url === '/collect') {
+              let body = '';
+              req.on('data', chunk => body += chunk);
+              req.on('end', () => {
+                try {
+                  const data = JSON.parse(body);
+                  
+                  // Add to memory store
+                  captures.push(data);
+                  if (captures.length > MAX_CAPTURES) {
+                    captures.shift(); // Remove oldest
+                  }
+                  
+                  // Log summary
+                  console.log('[COLLECTED]', JSON.stringify({
+                    timestamp: new Date().toISOString(),
+                    source: data.source,
+                    destination: data.destination,
+                    method: data.request.method,
+                    url: data.request.url,
+                    status: data.response.status,
+                    duration_ms: data.response.duration_ms,
+                    headers_count: Object.keys(data.request.headers).length,
+                    body_size: data.request.body ? data.request.body.length : 0
+                  }));
+                  
+                  // Append to file for persistence
+                  fs.appendFileSync('/data/captures.jsonl', JSON.stringify(data) + '\n');
+                  
+                  res.writeHead(200, { 'Content-Type': 'application/json' });
+                  res.end(JSON.stringify({ status: 'collected', id: Date.now() }));
+                } catch (e) {
+                  console.error('Invalid JSON:', e);
+                  res.writeHead(400);
+                  res.end('Invalid JSON');
+                }
+              });
+            } else if (req.method === 'GET' && req.url === '/health') {
+              res.writeHead(200);
+              res.end('OK');
+            } else if (req.method === 'GET' && req.url.startsWith('/query')) {
+              // Return last N captures
+              const url = new URL(req.url, 'http://localhost');
+              const limit = parseInt(url.searchParams.get('limit') || '10');
+              const offset = parseInt(url.searchParams.get('offset') || '0');
+              
+              const results = captures.slice(-limit - offset, -offset || undefined);
+              
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify(results, null, 2));
+            } else if (req.method === 'GET' && req.url === '/stats') {
+              // Return statistics
+              const stats = {
+                total_captures: captures.length,
+                methods: {},
+                status_codes: {},
+                services: {}
+              };
+              
+              captures.forEach(capture => {
+                // Count methods
+                stats.methods[capture.request.method] = (stats.methods[capture.request.method] || 0) + 1;
+                
+                // Count status codes
+                stats.status_codes[capture.response.status] = (stats.status_codes[capture.response.status] || 0) + 1;
+                
+                // Count services
+                stats.services[capture.destination.service] = (stats.services[capture.destination.service] || 0) + 1;
+              });
+              
+              res.writeHead(200, { 'Content-Type': 'application/json' });
+              res.end(JSON.stringify(stats, null, 2));
+            } else {
+              res.writeHead(404);
+              res.end('Not Found');
+            }
+          });
+          
+          // Load existing captures on startup
+          try {
+            if (fs.existsSync('/data/captures.jsonl')) {
+              const lines = fs.readFileSync('/data/captures.jsonl', 'utf8').split('\n');
+              lines.forEach(line => {
+                if (line.trim()) {
+                  try {
+                    captures.push(JSON.parse(line));
+                  } catch (e) {
+                    console.error('Failed to parse line:', e);
+                  }
+                }
+              });
+              console.log('Loaded ' + captures.length + ' existing captures');
+            }
+          } catch (e) {
+            console.error('Failed to load captures:', e);
+          }
+          
+          server.listen(9000, () => {
+            console.log('Traffic Collector listening on :9000');
+            console.log('POST /collect - Submit captured data');
+            console.log('GET /query?limit=N&offset=N - View captures');
+            console.log('GET /stats - View statistics');
+            console.log('GET /health - Health check');
+          });
+          EOF
+          
+          node /app/collector.js
+        ports:
+        - containerPort: 9000
+        volumeMounts:
+        - name: data
+          mountPath: /data
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "50m"
+          limits:
+            memory: "512Mi"
+            cpu: "200m"
+      volumes:
+      - name: data
+        emptyDir: {}

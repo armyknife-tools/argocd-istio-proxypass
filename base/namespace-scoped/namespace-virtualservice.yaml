@@ -1,0 +1,61 @@
+# Wildcard VirtualService for automatic traffic capture
+# This captures ALL services in the namespace without per-service configuration
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: wildcard-all-services
+spec:
+  hosts:
+  # Match all services in the namespace
+  - "*.perf-test-app-sbx.svc.cluster.local"
+  exportTo:
+  - "."  # Only export within this namespace
+  gateways:
+  - mesh
+  http:
+  # Route all traffic through the proxy
+  - route:
+    - destination:
+        host: passthrough-proxy.perf-test-app-sbx.svc.cluster.local
+        port:
+          number: 8080
+      headers:
+        request:
+          set:
+            x-original-host: "%REQ(:AUTHORITY)%"
+---
+# VirtualService for proxy - ensures it can be accessed directly
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: passthrough-proxy-direct
+spec:
+  hosts:
+  - passthrough-proxy
+  - passthrough-proxy.perf-test-app-sbx
+  - passthrough-proxy.perf-test-app-sbx.svc
+  - passthrough-proxy.perf-test-app-sbx.svc.cluster.local
+  http:
+  - route:
+    - destination:
+        host: passthrough-proxy.perf-test-app-sbx.svc.cluster.local
+        port:
+          number: 8080
+---
+# VirtualService for collector - ensures it can be accessed directly
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: traffic-collector-direct
+spec:
+  hosts:
+  - traffic-collector
+  - traffic-collector.perf-test-app-sbx
+  - traffic-collector.perf-test-app-sbx.svc
+  - traffic-collector.perf-test-app-sbx.svc.cluster.local
+  http:
+  - route:
+    - destination:
+        host: traffic-collector.perf-test-app-sbx.svc.cluster.local
+        port:
+          number: 9000

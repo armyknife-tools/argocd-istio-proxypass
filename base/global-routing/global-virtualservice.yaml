@@ -1,0 +1,49 @@
+# Global VirtualService deployed in istio-system namespace
+# This will capture traffic across ALL namespaces in the mesh
+---
+apiVersion: networking.istio.io/v1beta1
+kind: VirtualService
+metadata:
+  name: global-traffic-capture
+  # This will be deployed in istio-system namespace via overlay
+spec:
+  hosts:
+  - "*.svc.cluster.local"
+  exportTo:
+  - "*"  # Export to all namespaces
+  gateways:
+  - mesh
+  http:
+  # Skip routing for system namespaces
+  - match:
+    - headers:
+        host:
+          regex: "^[^.]+\\.(kube-system|kube-public|kube-node-lease|istio-system|istio-operator|cert-manager)\\.svc\\.cluster\\.local$"
+    route:
+    - destination:
+        host: passthrough-proxy.traffic-capture-prod.svc.cluster.local
+        port:
+          number: 8080
+      weight: 0  # Skip these system services
+  # Skip routing for passthrough-proxy and traffic-collector
+  - match:
+    - headers:
+        host:
+          regex: "^(passthrough-proxy|traffic-collector)\\.traffic-capture-prod\\.svc\\.cluster\\.local$"
+    route:
+    - destination:
+        host: passthrough-proxy.traffic-capture-prod.svc.cluster.local
+        port:
+          number: 8080
+      weight: 0
+  # Route all other traffic through proxy
+  - route:
+    - destination:
+        host: passthrough-proxy.traffic-capture-prod.svc.cluster.local
+        port:
+          number: 8080
+      headers:
+        request:
+          set:
+            x-original-host: "%REQ(:AUTHORITY)%"
+            x-capture-namespace: "%REQ(:AUTHORITY):~^[^.]+\\.([^.]+)\\.svc\\.cluster\\.local$~\\1%"

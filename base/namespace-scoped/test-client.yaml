@@ -1,0 +1,161 @@
+# Test client deployment WITH ISTIO SIDECAR
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: test-client
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: test-client
+  template:
+    metadata:
+      labels:
+        app: test-client
+        # ISTIO SIDECAR ENABLED for this app
+    spec:
+      containers:
+      - name: client
+        image: nicolaka/netshoot:latest
+        command: ["/bin/sh"]
+        args:
+        - -c
+        - |
+          # Create test scripts
+          cat > /check-connectivity.sh << 'SCRIPT'
+          #!/bin/sh
+          echo "=== Connectivity Check ==="
+          echo ""
+          echo "Checking connectivity to all required endpoints..."
+          echo ""
+          
+          echo -n "1. Proxy Service (passthrough-proxy:8080): "
+          if nc -z -w 2 passthrough-proxy 8080 2>/dev/null; then
+              echo "✅ Connected"
+          else
+              echo "❌ Failed"
+          fi
+          
+          echo -n "2. Collector Service (traffic-collector:9000): "
+          if nc -z -w 2 traffic-collector 9000 2>/dev/null; then
+              echo "✅ Connected"
+          else
+              echo "❌ Failed"
+          fi
+          
+          echo -n "3. Example App (example-app:80): "
+          if nc -z -w 2 example-app 80 2>/dev/null; then
+              echo "✅ Connected"
+          else
+              echo "❌ Failed"
+          fi
+          
+          echo ""
+          echo "DNS Resolution:"
+          echo -n "4. example-app.perf-test-app-sbx.svc.cluster.local: "
+          if nslookup example-app.perf-test-app-sbx.svc.cluster.local >/dev/null 2>&1; then
+              echo "✅ Resolved"
+          else
+              echo "❌ Failed"
+          fi
+          
+          echo ""
+          echo "Health Endpoints:"
+          echo -n "5. Proxy Health: "
+          if wget -qO- http://passthrough-proxy:8081/healthz >/dev/null 2>&1; then
+              echo "✅ Healthy"
+          else
+              echo "❌ Unhealthy"
+          fi
+          
+          echo -n "6. Collector Health: "
+          if wget -qO- http://traffic-collector:9000/health >/dev/null 2>&1; then
+              echo "✅ Healthy"
+          else
+              echo "❌ Unhealthy"
+          fi
+          
+          echo ""
+          echo "Connectivity check complete!"
+          echo ""
+          SCRIPT
+          
+          cat > /test-traffic.sh << 'SCRIPT'
+          #!/bin/sh
+          echo "=== Generating Test Traffic ==="
+          echo ""
+          
+          echo "Test 1: Direct request to example-app (will be routed through proxy by VirtualService)"
+          curl -s http://example-app/api/customer/12345
+          echo -e "\n"
+          
+          echo "Test 2: POST with sensitive data (will be masked)"
+          curl -s -X POST \
+               -H "Content-Type: application/json" \
+               -H "Authorization: Bearer eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9" \
+               -d '{"ssn":"987-65-4321","credit_card":"5555-4444-3333-2222","email":"john@example.com","password":"secretpass123"}' \
+               http://example-app/api/customer/update
+          echo -e "\n"
+          
+          echo "Test 3: Request with API key (will be masked)"
+          curl -s -H "X-API-Key: sk-1234567890abcdef" \
+               -H "User-Agent: TestClient/1.0" \
+               http://example-app/api/orders?customer=12345
+          echo -e "\n"
+          
+          echo "Traffic generation complete!"
+          SCRIPT
+          
+          cat > /view-captures.sh << 'SCRIPT'
+          #!/bin/sh
+          echo "=== Viewing Captured Traffic ==="
+          echo ""
+          echo "Last 10 captures:"
+          echo ""
+          curl -s http://traffic-collector:9000/query | jq -r '.[] | 
+            "[\(.timestamp)] \(.request.method) \(.destination.hostname)\(.request.url) -> \(.response.status) (\(.response.duration_ms)ms)"'
+          echo ""
+          echo "For full details: curl -s http://traffic-collector:9000/query | jq"
+          SCRIPT
+          
+          cat > /check-masking.sh << 'SCRIPT'
+          #!/bin/sh
+          echo "=== Checking Data Masking ==="
+          echo ""
+          curl -s http://traffic-collector:9000/query?limit=1 | jq '.[0] | {
+            timestamp: .timestamp,
+            url: .request.url,
+            auth_header: .request.headers.authorization,
+            api_key: .request.headers["x-api-key"],
+            request_body: .request.body,
+            response_body: .response.body,
+            istio_headers: .istio_headers
+          }'
+          SCRIPT
+          
+          cat > /view-stats.sh << 'SCRIPT'
+          #!/bin/sh
+          echo "=== Traffic Statistics ==="
+          echo ""
+          curl -s http://traffic-collector:9000/stats | jq
+          SCRIPT
+          
+          chmod +x /*.sh
+          
+          echo "Test client ready. Available commands:"
+          echo "  /check-connectivity.sh - Check all endpoint connectivity"
+          echo "  /test-traffic.sh       - Generate test traffic"
+          echo "  /view-captures.sh      - View captured requests"
+          echo "  /check-masking.sh      - Verify data masking"
+          echo "  /view-stats.sh         - View traffic statistics"
+          echo ""
+          
+          # Keep container running
+          sleep infinity
+        resources:
+          requests:
+            memory: "64Mi"
+            cpu: "20m"
+          limits:
+            memory: "128Mi"
+            cpu: "50m"

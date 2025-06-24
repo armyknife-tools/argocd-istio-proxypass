@@ -1,0 +1,11 @@
+# Dev environment patches
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: proxy-config
+data:
+  sampling_rate: "1.0"  # 100% capture for development
+  collector_url: "http://traffic-collector:9000/collect"
+  max_body_size: "16384"  # Larger for dev testing
+  mask_sensitive_data: "true"

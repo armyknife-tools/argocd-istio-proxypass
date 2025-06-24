@@ -1,0 +1,21 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+namespace: traffic-capture-prod
+
+bases:
+  - ../../base/global-routing
+
+patchesStrategicMerge:
+  - config-patch.yaml
+  - resource-patch.yaml
+  - global-vs-patch.yaml
+
+configMapGenerator:
+  - name: proxy-config
+    behavior: replace
+    literals:
+      - sampling_rate=0.001  # 0.1% for production
+      - collector_url=http://traffic-collector:9000/collect
+      - max_body_size=4096
+      - mask_sensitive_data=true

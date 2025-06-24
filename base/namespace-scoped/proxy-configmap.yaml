@@ -1,0 +1,17 @@
+# Enhanced Proxy with Collector Integration and Istio Support (NO SIDECAR)
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: proxy-config
+data:
+  sampling_rate: "1.0"  # 100% capture for demo/testing
+  # For production, reduce sampling rate:
+  # - Testing: "0.1" (10% - easy verification with ~10 requests)
+  # - Low traffic: "0.01" (1%)
+  # - Medium traffic: "0.001" (0.1%)
+  # - High traffic: "0.0001" (0.01%)
+  # To update: kubectl edit configmap proxy-config -n YOUR_NAMESPACE
+  # Then restart: kubectl rollout restart deployment passthrough-proxy -n YOUR_NAMESPACE
+  collector_url: "http://traffic-collector:9000/collect"
+  max_body_size: "8192"
+  mask_sensitive_data: "true"

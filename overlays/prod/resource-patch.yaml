@@ -1,0 +1,37 @@
+# Higher resources for production
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: passthrough-proxy
+spec:
+  replicas: 2  # HA for production
+  template:
+    spec:
+      containers:
+      - name: proxy
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "1000m"
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: traffic-collector
+spec:
+  replicas: 2  # HA for production
+  template:
+    spec:
+      containers:
+      - name: collector
+        resources:
+          requests:
+            memory: "1Gi"
+            cpu: "200m"
+          limits:
+            memory: "2Gi"
+            cpu: "500m"

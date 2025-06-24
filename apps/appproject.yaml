@@ -1,0 +1,43 @@
+# Optional: Create a dedicated ArgoCD project for traffic capture
+apiVersion: argoproj.io/v1alpha1
+kind: AppProject
+metadata:
+  name: traffic-capture
+  namespace: argocd
+spec:
+  description: Istio Traffic Capture Solution
+  
+  sourceRepos:
+  - 'https://github.com/YOUR-ORG/YOUR-REPO'  # UPDATE THIS
+  
+  destinations:
+  # Dev environment
+  - namespace: traffic-capture-dev
+    server: https://kubernetes.default.svc
+  # Prod environment
+  - namespace: traffic-capture-prod
+    server: https://kubernetes.default.svc
+  # istio-system for global VirtualService
+  - namespace: istio-system
+    server: https://kubernetes.default.svc
+  
+  clusterResourceWhitelist:
+  - group: ''
+    kind: Namespace
+  
+  namespaceResourceWhitelist:
+  - group: '*'
+    kind: '*'
+  
+  roles:
+  - name: admin
+    policies:
+    - p, proj:traffic-capture:admin, applications, *, traffic-capture/*, allow
+    groups:
+    - your-admin-group  # UPDATE THIS
+  
+  - name: readonly
+    policies:
+    - p, proj:traffic-capture:readonly, applications, get, traffic-capture/*, allow
+    groups:
+    - your-readonly-group  # UPDATE THIS

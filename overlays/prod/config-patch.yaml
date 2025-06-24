@@ -1,0 +1,11 @@
+# Production environment patches
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: proxy-config
+data:
+  sampling_rate: "0.001"  # 0.1% for production
+  collector_url: "http://traffic-collector:9000/collect"
+  max_body_size: "4096"  # Smaller to save memory
+  mask_sensitive_data: "true"  # Always true in production

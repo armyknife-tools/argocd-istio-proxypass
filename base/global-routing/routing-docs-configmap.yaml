@@ -1,0 +1,66 @@
+# Namespace-wide Automatic Routing Configuration Documentation
+# This ConfigMap contains documentation about how the wildcard routing works
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: proxy-routing-config
+data:
+  routing.txt: |
+    AUTOMATIC NAMESPACE-WIDE TRAFFIC CAPTURE
+    
+    This namespace uses a wildcard VirtualService to automatically capture ALL traffic.
+    No per-service configuration is required - new services are captured automatically.
+    
+    Key Components:
+    1. Wildcard VirtualService (*.perf-test-app-sbx.svc.cluster.local)
+       - Captures all service traffic automatically
+       - Routes everything through passthrough-proxy
+       - Sets x-original-host header for tracking
+    
+    2. Direct VirtualServices for infrastructure
+       - passthrough-proxy-direct: Allows direct access to proxy
+       - traffic-collector-direct: Allows direct access to collector
+       - Prevents routing loops
+    
+    3. Service Configuration:
+       - Proxy and Collector: NO Istio sidecars (prevent loops)
+       - All other services: WITH Istio sidecars (automatic injection)
+    
+    Traffic Flow:
+    1. App A (with sidecar) calls App B
+    2. Wildcard VirtualService intercepts the call
+    3. Traffic routed to Passthrough Proxy (no sidecar)
+    4. Proxy forwards to App B and captures data
+    5. Proxy sends capture to Traffic Collector (no sidecar)
+    
+    IMPORTANT: No manual VirtualService creation needed for new services!
+    
+    Testing:
+    - Deploy any new service in the namespace
+    - Make a request to it
+    - Check traffic-collector:9000/stats to see it captured
+    
+    Example wildcard VirtualService:
+    
+    apiVersion: networking.istio.io/v1beta1
+    kind: VirtualService
+    metadata:
+      name: wildcard-all-services
+      namespace: perf-test-app-sbx
+    spec:
+      hosts:
+      - "*.perf-test-app-sbx.svc.cluster.local"
+      exportTo:
+      - "."
+      gateways:
+      - mesh
+      http:
+      - route:
+        - destination:
+            host: passthrough-proxy.perf-test-app-sbx.svc.cluster.local
+            port:
+              number: 8080
+          headers:
+            request:
+              set:
+                x-original-host: "%REQ(:AUTHORITY)%"

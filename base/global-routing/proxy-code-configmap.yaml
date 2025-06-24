@@ -1,0 +1,364 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: proxy-code
+data:
+  server.js: |
+    const http = require('http');
+    const cluster = require('cluster');
+    const os = require('os');
+    
+    const CONFIG = {
+      PORT: 8080,
+      HEALTH_PORT: 8081,
+      SAMPLING_RATE: parseFloat(process.env.SAMPLING_RATE || '1.0'),
+      COLLECTOR_URL: process.env.COLLECTOR_URL || 'http://traffic-collector:9000/collect',
+      MAX_BODY_SIZE: parseInt(process.env.MAX_BODY_SIZE || '8192'),
+      MASK_SENSITIVE: process.env.MASK_SENSITIVE_DATA === 'true',
+      LOG_LEVEL: process.env.LOG_LEVEL || 'info',
+      NODE_NAME: process.env.NODE_NAME || 'unknown',
+      POD_NAME: process.env.POD_NAME || 'unknown',
+      NAMESPACE: process.env.NAMESPACE || 'perf-test-app-sbx'
+    };
+    
+    // Enhanced sensitive data masking patterns
+    const SENSITIVE_PATTERNS = [
+      { pattern: /\b\d{3}-\d{2}-\d{4}\b/g, replacement: '[SSN-MASKED]' },
+      { pattern: /\b\d{4}[\s-]?\d{4}[\s-]?\d{4}[\s-]?\d{4}\b/g, replacement: '[CC-MASKED]' },
+      { pattern: /\b\d{4}[\s-]?\d{6}[\s-]?\d{5}\b/g, replacement: '[CC-MASKED]' },
+      { pattern: /"password"\s*:\s*"[^"]+"/gi, replacement: '"password":"[MASKED]"' },
+      { pattern: /"passwd"\s*:\s*"[^"]+"/gi, replacement: '"passwd":"[MASKED]"' },
+      { pattern: /"token"\s*:\s*"[^"]+"/gi, replacement: '"token":"[MASKED]"' },
+      { pattern: /"api_key"\s*:\s*"[^"]+"/gi, replacement: '"api_key":"[MASKED]"' },
+      { pattern: /"apikey"\s*:\s*"[^"]+"/gi, replacement: '"apikey":"[MASKED]"' },
+      { pattern: /"secret"\s*:\s*"[^"]+"/gi, replacement: '"secret":"[MASKED]"' },
+      { pattern: /Bearer\s+[A-Za-z0-9\-_\.]+/g, replacement: 'Bearer [TOKEN-MASKED]' },
+      { pattern: /Basic\s+[A-Za-z0-9\+\/]+=*/g, replacement: 'Basic [BASIC-MASKED]' },
+      { pattern: /([a-zA-Z0-9._-]+@[a-zA-Z0-9._-]+\.[a-zA-Z0-9_-]+)/g, replacement: '[EMAIL-MASKED]' }
+    ];
+    
+    const SENSITIVE_HEADERS = [
+      'authorization', 'cookie', 'x-api-key', 'x-auth-token', 
+      'x-access-token', 'x-secret-key', 'api-key', 'auth-token'
+    ];
+    
+    // Istio-specific headers to preserve/handle
+    const ISTIO_HEADERS = [
+      'x-forwarded-for', 'x-forwarded-proto', 'x-envoy-original-path',
+      'x-b3-traceid', 'x-b3-spanid', 'x-b3-parentspanid', 'x-b3-sampled',
+      'x-request-id', 'x-envoy-decorator-operation', 'x-original-host'
+    ];
+    
+    if (cluster.isMaster) {
+      const numCPUs = 2; // Reduced for low resource environments
+      console.log('Master starting ' + numCPUs + ' workers');
+      
+      for (let i = 0; i < numCPUs; i++) {
+        cluster.fork();
+      }
+      
+      cluster.on('exit', (worker, code, signal) => {
+        console.log('Worker ' + worker.process.pid + ' died');
+        cluster.fork();
+      });
+      
+      return;
+    }
+    
+    // Worker process
+    console.log('[Worker ' + process.pid + '] Starting with sampling rate: ' + CONFIG.SAMPLING_RATE);
+    
+    function maskSensitiveData(text) {
+      if (!CONFIG.MASK_SENSITIVE || typeof text !== 'string') return text;
+      
+      let masked = text;
+      for (const rule of SENSITIVE_PATTERNS) {
+        masked = masked.replace(rule.pattern, rule.replacement);
+      }
+      return masked;
+    }
+    
+    function maskHeaders(headers) {
+      if (!CONFIG.MASK_SENSITIVE) return headers;
+      
+      const masked = Object.assign({}, headers);
+      for (const header of SENSITIVE_HEADERS) {
+        const lowerHeader = header.toLowerCase();
+        Object.keys(masked).forEach(key => {
+          if (key.toLowerCase() === lowerHeader) {
+            masked[key] = '[HEADER-MASKED]';
+          }
+        });
+      }
+      return masked;
+    }
+    
+    function shouldCapture() {
+      return Math.random() < CONFIG.SAMPLING_RATE;
+    }
+    
+    function parseHostHeader(hostHeader, originalHost) {
+      // First check for x-original-host header (set by VirtualService)
+      if (originalHost) {
+        const parts = originalHost.split('.');
+        return {
+          hostname: originalHost,
+          port: 80,
+          service: parts[0],
+          namespace: parts.length > 1 ? parts[1] : 'default'
+        };
+      }
+      
+      if (!hostHeader) return null;
+      
+      const parts = hostHeader.split(':');
+      const hostname = parts[0];
+      const port = parts[1] || '80';
+      
+      if (hostname.endsWith('.local') || hostname.endsWith('.cluster.local')) {
+        const serviceParts = hostname.split('.');
+        return {
+          hostname: hostname,
+          port: parseInt(port),
+          service: serviceParts[0],
+          namespace: serviceParts.length > 2 ? serviceParts[1] : 'default'
+        };
+      }
+      
+      return {
+        hostname: hostname,
+        port: parseInt(port),
+        service: hostname,
+        namespace: 'external'
+      };
+    }
+    
+    function sendToCollector(data) {
+      if (!CONFIG.COLLECTOR_URL) return;
+      
+      const payload = JSON.stringify(data);
+      const url = new URL(CONFIG.COLLECTOR_URL);
+      
+      const options = {
+        hostname: url.hostname,
+        port: url.port || 80,
+        path: url.pathname,
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Content-Length': Buffer.byteLength(payload)
+        },
+        timeout: 5000
+      };
+      
+      const req = http.request(options, (res) => {
+        if (res.statusCode !== 200 && CONFIG.LOG_LEVEL === 'debug') {
+          console.error('[Collector] Returned ' + res.statusCode);
+        }
+      });
+      
+      req.on('error', (err) => {
+        if (CONFIG.LOG_LEVEL === 'debug') {
+          console.error('[Collector] Failed to send:', err.message);
+        }
+      });
+      
+      req.on('timeout', () => {
+        req.destroy();
+      });
+      
+      req.write(payload);
+      req.end();
+    }
+    
+    const server = http.createServer((req, res) => {
+      const startTime = Date.now();
+      
+      if (req.url === '/health' || req.url === '/ready') {
+        res.writeHead(200);
+        res.end('OK');
+        return;
+      }
+      
+      const target = parseHostHeader(req.headers.host, req.headers['x-original-host']);
+      if (!target) {
+        res.writeHead(400, { 'Content-Type': 'text/plain' });
+        res.end('Bad Request: Missing Host header');
+        return;
+      }
+      
+      const capture = shouldCapture();
+      let captureData = null;
+      
+      if (capture) {
+        captureData = {
+          timestamp: new Date().toISOString(),
+          source: {
+            address: req.socket.remoteAddress,
+            port: req.socket.remotePort
+          },
+          destination: {
+            hostname: target.hostname,
+            port: target.port,
+            service: target.service,
+            namespace: target.namespace
+          },
+          request: {
+            method: req.method,
+            url: req.url,
+            headers: maskHeaders(req.headers),
+            body: ''
+          },
+          response: {
+            status: null,
+            headers: {},
+            body: '',
+            duration_ms: null
+          },
+          proxy: {
+            node: CONFIG.NODE_NAME,
+            pod: CONFIG.POD_NAME,
+            namespace: CONFIG.NAMESPACE
+          },
+          istio_headers: {}
+        };
+        
+        // Capture Istio headers separately
+        ISTIO_HEADERS.forEach(header => {
+          if (req.headers[header]) {
+            captureData.istio_headers[header] = req.headers[header];
+          }
+        });
+      }
+      
+      let requestBody = '';
+      let requestSize = 0;
+      
+      req.on('data', chunk => {
+        if (capture && requestSize < CONFIG.MAX_BODY_SIZE) {
+          requestBody += chunk;
+          requestSize += chunk.length;
+        }
+      });
+      
+      req.on('end', () => {
+        if (capture && requestBody) {
+          captureData.request.body = maskSensitiveData(requestBody);
+          captureData.request.body_truncated = requestSize > CONFIG.MAX_BODY_SIZE;
+        }
+        
+        const proxyOptions = {
+          hostname: target.hostname,
+          port: target.port,
+          path: req.url,
+          method: req.method,
+          headers: req.headers,
+          timeout: 30000
+        };
+        
+        // Remove x-original-host before forwarding
+        delete proxyOptions.headers['x-original-host'];
+        
+        const proxyReq = http.request(proxyOptions, (proxyRes) => {
+          if (captureData && capture) {
+            captureData.response.status = proxyRes.statusCode;
+            captureData.response.headers = maskHeaders(proxyRes.headers);
+          }
+          
+          res.writeHead(proxyRes.statusCode, proxyRes.headers);
+          
+          let responseBody = '';
+          let responseSize = 0;
+          
+          proxyRes.on('data', chunk => {
+            res.write(chunk);
+            if (capture && responseSize < CONFIG.MAX_BODY_SIZE) {
+              responseBody += chunk;
+              responseSize += chunk.length;
+            }
+          });
+          
+          proxyRes.on('end', () => {
+            res.end();
+            
+            if (captureData) {
+              captureData.response.body = maskSensitiveData(responseBody.toString());
+              captureData.response.body_truncated = responseSize > CONFIG.MAX_BODY_SIZE;
+              captureData.response.duration_ms = Date.now() - startTime;
+              
+              // Log locally
+              if (CONFIG.LOG_LEVEL === 'info' || CONFIG.LOG_LEVEL === 'debug') {
+                console.log('[PROXY_CAPTURE]', JSON.stringify({
+                  timestamp: captureData.timestamp,
+                  method: captureData.request.method,
+                  url: captureData.request.url,
+                  target: captureData.destination.hostname,
+                  status: captureData.response.status,
+                  duration: captureData.response.duration_ms
+                }));
+              }
+              
+              // Send to collector
+              sendToCollector(captureData);
+            }
+          });
+        });
+        
+        proxyReq.on('error', (err) => {
+          if (CONFIG.LOG_LEVEL === 'info' || CONFIG.LOG_LEVEL === 'debug') {
+            console.error('[PROXY_ERROR]', err.message);
+          }
+          
+          if (!res.headersSent) {
+            res.writeHead(502, { 'Content-Type': 'text/plain' });
+            res.end('Bad Gateway');
+          }
+        });
+        
+        proxyReq.on('timeout', () => {
+          proxyReq.destroy();
+          
+          if (!res.headersSent) {
+            res.writeHead(504, { 'Content-Type': 'text/plain' });
+            res.end('Gateway Timeout');
+          }
+        });
+        
+        if (requestBody) {
+          proxyReq.write(requestBody);
+        }
+        proxyReq.end();
+      });
+    });
+    
+    const healthServer = http.createServer((req, res) => {
+      if (req.url === '/healthz') {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ 
+          status: 'healthy',
+          sampling_rate: CONFIG.SAMPLING_RATE,
+          collector_url: CONFIG.COLLECTOR_URL,
+          worker_pid: process.pid
+        }));
+      } else if (req.url === '/metrics') {
+        res.writeHead(200, { 'Content-Type': 'text/plain' });
+        res.end('# HELP proxy_sampling_rate Current sampling rate\n# TYPE proxy_sampling_rate gauge\nproxy_sampling_rate ' + CONFIG.SAMPLING_RATE + '\n');
+      } else {
+        res.writeHead(404);
+        res.end();
+      }
+    });
+    
+    server.listen(CONFIG.PORT, () => {
+      console.log('[Worker ' + process.pid + '] Proxy listening on :' + CONFIG.PORT);
+    });
+    
+    healthServer.listen(CONFIG.HEALTH_PORT, () => {
+      console.log('[Worker ' + process.pid + '] Health check on :' + CONFIG.HEALTH_PORT);
+    });
+    
+    process.on('SIGTERM', () => {
+      console.log('[Worker ' + process.pid + '] Shutting down gracefully...');
+      server.close();
+      healthServer.close();
+    });

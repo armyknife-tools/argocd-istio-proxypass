@@ -1,0 +1,21 @@
+# DestinationRule to configure traffic policy for proxy (disable mTLS)
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: passthrough-proxy-dr
+spec:
+  host: passthrough-proxy.perf-test-app-sbx.svc.cluster.local
+  trafficPolicy:
+    tls:
+      mode: DISABLE
+---
+# DestinationRule for traffic-collector (disable mTLS)
+apiVersion: networking.istio.io/v1beta1
+kind: DestinationRule
+metadata:
+  name: traffic-collector-dr
+spec:
+  host: traffic-collector.perf-test-app-sbx.svc.cluster.local
+  trafficPolicy:
+    tls:
+      mode: DISABLE

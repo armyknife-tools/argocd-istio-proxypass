@@ -1,0 +1,46 @@
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: traffic-capture-prod
+  namespace: argocd
+  finalizers:
+    - resources-finalizer.argocd.argoproj.io
+spec:
+  project: default
+  
+  source:
+    repoURL: https://github.com/YOUR-ORG/YOUR-REPO  # UPDATE THIS
+    targetRevision: HEAD
+    path: v3/namespace-only/argo-cd-deployment/overlays/prod
+  
+  destination:
+    server: https://kubernetes.default.svc
+    namespace: traffic-capture-prod
+  
+  syncPolicy:
+    automated:
+      prune: false  # Manual pruning for production
+      selfHeal: false  # Manual healing for production
+      allowEmpty: false
+    syncOptions:
+    - CreateNamespace=false
+    - PrunePropagationPolicy=foreground
+    - RespectIgnoreDifferences=true
+    retry:
+      limit: 3
+      backoff:
+        duration: 5s
+        factor: 2
+        maxDuration: 1m
+  
+  # Production requires manual sync for safety
+  # To enable auto-sync, uncomment the automated section above
+  
+  revisionHistoryLimit: 10
+  
+  # Ignore differences in resource quantities due to HPA
+  ignoreDifferences:
+  - group: apps
+    kind: Deployment
+    jsonPointers:
+    - /spec/replicas
