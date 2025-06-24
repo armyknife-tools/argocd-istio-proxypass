@@ -54,7 +54,7 @@ fi
 
 # Update Git repository URL
 echo -e "\n${YELLOW}IMPORTANT: Update Git repository URL in application manifests${NC}"
-echo "Current placeholder: https://github.com/armyknife-tools/argocd-istio-proxypass"
+echo "Current repository: https://github.com/armyknife-tools/argocd-istio-proxypass"
 read -p "Enter your Git repository URL: " REPO_URL
 
 if [ -z "$REPO_URL" ]; then

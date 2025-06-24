@@ -9,7 +9,7 @@ spec:
   project: default
   
   source:
-    repoURL: https://github.com/YOUR-ORG/YOUR-REPO  # UPDATE THIS
+    repoURL: https://github.com/armyknife-tools/argocd-istio-proxypass
     targetRevision: HEAD
     path: v3/namespace-only/argo-cd-deployment/overlays/prod
   

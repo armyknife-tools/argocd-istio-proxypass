@@ -20,23 +20,7 @@ spec:
     - headers:
         x-forwarded-by:
           exact: envoy-proxy
-    route:
-    - destination:
-        host: passthrough-proxy
-        port:
-          number: 8080
-  # Skip system namespaces to avoid capturing cross-namespace traffic
-  - match:
-    - uri:
-        prefix: "/"
-      headers:
-        host:
-          regex: "^[^.]+\\.(kube-system|kube-public|kube-node-lease|istio-system|istio-config|istio-operator|cert-manager|argocd|monitoring|logging|default)\\.svc\\.cluster\\.local$"
-    route:
-    - destination:
-        host: passthrough-proxy
-        port:
-          number: 8080
+    # No route - let it pass through normally
   # Skip proxy and collector to prevent loops
   - match:
     - uri:
@@ -44,11 +28,7 @@ spec:
       headers:
         host:
           regex: "^(passthrough-proxy|traffic-collector).*"
-    route:
-    - destination:
-        host: passthrough-proxy
-        port:
-          number: 8080
+    # No route - direct access without proxy
   # Route all other traffic through proxy
   - route:
     - destination:
@@ -60,53 +40,3 @@ spec:
           set:
             x-original-host: "%REQ(:AUTHORITY)%"
             x-forwarded-by: envoy-proxy
----
-# Direct access to proxy (prevents loops)
-apiVersion: networking.istio.io/v1beta1
-kind: VirtualService
-metadata:
-  name: passthrough-proxy-direct
-spec:
-  exportTo:
-  - "."
-  hosts:
-  - passthrough-proxy
-  - passthrough-proxy.svc
-  - passthrough-proxy.svc.cluster.local
-  gateways:
-  - mesh
-  http:
-  - match:
-    - headers:
-        x-forwarded-by:
-          exact: envoy-proxy
-    route:
-    - destination:
-        host: passthrough-proxy
-        port:
-          number: 8080
----
-# Direct access to collector (prevents loops)
-apiVersion: networking.istio.io/v1beta1
-kind: VirtualService
-metadata:
-  name: traffic-collector-direct
-spec:
-  exportTo:
-  - "."
-  hosts:
-  - traffic-collector
-  - traffic-collector.svc
-  - traffic-collector.svc.cluster.local
-  gateways:
-  - mesh
-  http:
-  - match:
-    - headers:
-        x-forwarded-by:
-          exact: envoy-proxy
-    route:
-    - destination:
-        host: traffic-collector
-        port:
-          number: 9000

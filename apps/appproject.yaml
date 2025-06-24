@@ -8,7 +8,7 @@ spec:
   description: Istio Traffic Capture Solution
   
   sourceRepos:
-  - 'https://github.com/YOUR-ORG/YOUR-REPO'  # UPDATE THIS
+  - 'https://github.com/armyknife-tools/argocd-istio-proxypass'
   
   destinations:
   # Dev environment
