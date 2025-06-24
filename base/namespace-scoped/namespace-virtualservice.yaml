@@ -15,20 +15,6 @@ spec:
   # it should only affect pods in this namespace
   - "*.svc.cluster.local"
   http:
-  # Skip if already forwarded by proxy (prevent loops)
-  - match:
-    - headers:
-        x-forwarded-by:
-          exact: envoy-proxy
-    # No route - let it pass through normally
-  # Skip proxy and collector to prevent loops
-  - match:
-    - uri:
-        prefix: "/"
-      headers:
-        host:
-          regex: "^(passthrough-proxy|traffic-collector).*"
-    # No route - direct access without proxy
   # Route all other traffic through proxy
   - route:
     - destination:
