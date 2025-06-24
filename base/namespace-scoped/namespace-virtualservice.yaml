@@ -1,4 +1,6 @@
-# Wildcard VirtualService for namespace-scoped traffic capture
+# NOTE: For true namespace isolation, we recommend using Istio Sidecar configuration
+# This VirtualService captures traffic but cannot guarantee namespace isolation
+# without additional Sidecar configuration
 apiVersion: networking.istio.io/v1beta1
 kind: VirtualService
 metadata:
@@ -9,9 +11,9 @@ spec:
   gateways:
   - mesh
   hosts:
-  # Only match services WITHOUT a namespace qualifier
-  # This ensures we only capture traffic within the same namespace
-  - "*"
+  # This will capture all traffic, but combined with exportTo: "."
+  # it should only affect pods in this namespace
+  - "*.svc.cluster.local"
   http:
   # Skip if already forwarded by proxy (prevent loops)
   - match:
@@ -23,19 +25,31 @@ spec:
         host: passthrough-proxy
         port:
           number: 8080
-  # Skip certain services even within namespace
+  # Skip system namespaces to avoid capturing cross-namespace traffic
   - match:
     - uri:
         prefix: "/"
       headers:
         host:
-          regex: "^(passthrough-proxy|traffic-collector|istio-.*|kube-.*)"
+          regex: "^[^.]+\\.(kube-system|kube-public|kube-node-lease|istio-system|istio-config|istio-operator|cert-manager|argocd|monitoring|logging|default)\\.svc\\.cluster\\.local$"
     route:
     - destination:
         host: passthrough-proxy
         port:
           number: 8080
-  # Route all other in-namespace traffic through proxy
+  # Skip proxy and collector to prevent loops
+  - match:
+    - uri:
+        prefix: "/"
+      headers:
+        host:
+          regex: "^(passthrough-proxy|traffic-collector).*"
+    route:
+    - destination:
+        host: passthrough-proxy
+        port:
+          number: 8080
+  # Route all other traffic through proxy
   - route:
     - destination:
         host: passthrough-proxy

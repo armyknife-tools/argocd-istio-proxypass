@@ -1,0 +1,15 @@
+# Sidecar configuration for namespace isolation
+# This ensures pods in this namespace can only see services in their own namespace
+apiVersion: networking.istio.io/v1beta1
+kind: Sidecar
+metadata:
+  name: default
+spec:
+  egress:
+  - hosts:
+    # Allow all traffic within the current namespace
+    - "./*"
+    # Allow access to Istio system for telemetry
+    - "istio-system/*"
+    # Allow DNS resolution
+    - "kube-system/kube-dns.kube-system.svc.cluster.local"
