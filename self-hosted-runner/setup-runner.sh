@@ -113,8 +113,12 @@ echo -e "\n6. Waiting for controller to be ready..."
 kubectl wait --for=condition=ready pod -l app.kubernetes.io/name=actions-runner-controller \
   -n $NAMESPACE --timeout=300s
 
-# Step 6: Create runner deployment
-echo -e "\n7. Creating runner deployment..."
+# Step 6: Apply RBAC for runners
+echo -e "\n7. Applying RBAC..."
+kubectl apply -f runner-rbac.yaml 2>/dev/null || echo "RBAC will be applied when runner-rbac.yaml is available"
+
+# Step 7: Create runner deployment
+echo -e "\n8. Creating runner deployment..."
 cat <<EOF | kubectl apply -f -
 apiVersion: actions.summerwind.dev/v1alpha1
 kind: RunnerDeployment
@@ -129,9 +133,26 @@ spec:
       labels:
         - self-hosted
         - linux
+      
+      # Use service account with permissions
+      serviceAccountName: github-runner
+      
+      # Environment variables
+      env:
+      - name: RUNNER_FEATURE_FLAG_EPHEMERAL
+        value: "true"
+      
+      # Resources
+      resources:
+        limits:
+          cpu: "2"
+          memory: "4Gi"
+        requests:
+          cpu: "1"
+          memory: "2Gi"
 EOF
 
-echo -e "\n8. Checking status..."
+echo -e "\n9. Checking status..."
 sleep 10
 kubectl get pods -n $NAMESPACE
 

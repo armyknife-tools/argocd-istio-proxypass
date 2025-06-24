@@ -43,6 +43,14 @@ jobs:
           echo "NAMESPACE=traffic-capture-auto-${GITHUB_SHA::8}" >> $GITHUB_ENV
         fi
 
+    - name: Install kubectl
+      run: |
+        echo "Installing kubectl..."
+        curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+        chmod +x kubectl
+        sudo mv kubectl /usr/local/bin/
+        kubectl version --client
+
     - name: Create namespace with Istio injection
       run: |
         echo "Creating namespace: $NAMESPACE"

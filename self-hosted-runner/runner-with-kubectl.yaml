@@ -1,0 +1,48 @@
+apiVersion: actions.summerwind.dev/v1alpha1
+kind: RunnerDeployment
+metadata:
+  name: github-runner-kubectl
+  namespace: actions-runner-system
+spec:
+  replicas: 2
+  template:
+    spec:
+      repository: armyknife-tools/argocd-istio-proxypass
+      labels:
+        - self-hosted
+        - linux
+      
+      # Use dind runner which includes Docker and we can install kubectl
+      image: summerwind/actions-runner-dind:latest
+      dockerdWithinRunnerContainer: true
+      
+      # ServiceAccount with permissions
+      serviceAccountName: github-runner
+      
+      # Environment variables
+      env:
+      - name: RUNNER_FEATURE_FLAG_EPHEMERAL
+        value: "true"
+      
+      # Resources
+      resources:
+        limits:
+          cpu: "2"
+          memory: "4Gi"
+        requests:
+          cpu: "1"
+          memory: "2Gi"
+      
+      # Pre-install kubectl in the runner
+      spec:
+        containers:
+        - name: runner
+          command: ["/bin/bash", "-c"]
+          args:
+          - |
+            # Install kubectl
+            curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl"
+            chmod +x kubectl
+            sudo mv kubectl /usr/local/bin/
+            # Start the runner
+            /entrypoint.sh
