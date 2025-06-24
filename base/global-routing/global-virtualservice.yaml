@@ -1,49 +1,39 @@
-# Global VirtualService deployed in istio-system namespace
-# This will capture traffic across ALL namespaces in the mesh
----
+# Global VirtualService for cluster-wide traffic capture
+# This will be deployed to istio-system namespace via overlay patch
 apiVersion: networking.istio.io/v1beta1
 kind: VirtualService
 metadata:
   name: global-traffic-capture
-  # This will be deployed in istio-system namespace via overlay
 spec:
-  hosts:
-  - "*.svc.cluster.local"
   exportTo:
   - "*"  # Export to all namespaces
   gateways:
   - mesh
+  hosts:
+  - "*.svc.cluster.local"
   http:
-  # Skip routing for system namespaces
+  # Skip system namespaces
   - match:
-    - headers:
+    - uri:
+        prefix: "/"
+      headers:
         host:
-          regex: "^[^.]+\\.(kube-system|kube-public|kube-node-lease|istio-system|istio-operator|cert-manager)\\.svc\\.cluster\\.local$"
+          regex: "^[^.]+\\.(kube-system < /dev/null | kube-public|kube-node-lease|istio-system|istio-config|istio-operator|cert-manager|argocd|monitoring|logging)\\.svc\\.cluster\\.local$"
     route:
     - destination:
-        host: passthrough-proxy.traffic-capture-prod.svc.cluster.local
+        host: passthrough-proxy
         port:
           number: 8080
-      weight: 0  # Skip these system services
-  # Skip routing for passthrough-proxy and traffic-collector
-  - match:
-    - headers:
-        host:
-          regex: "^(passthrough-proxy|traffic-collector)\\.traffic-capture-prod\\.svc\\.cluster\\.local$"
-    route:
-    - destination:
-        host: passthrough-proxy.traffic-capture-prod.svc.cluster.local
-        port:
-          number: 8080
-      weight: 0
   # Route all other traffic through proxy
   - route:
     - destination:
-        host: passthrough-proxy.traffic-capture-prod.svc.cluster.local
+        # This needs to be patched to the full service name
+        # by the prod overlay since it's cross-namespace
+        host: passthrough-proxy
         port:
           number: 8080
       headers:
         request:
           set:
             x-original-host: "%REQ(:AUTHORITY)%"
-            x-capture-namespace: "%REQ(:AUTHORITY):~^[^.]+\\.([^.]+)\\.svc\\.cluster\\.local$~\\1%"
+            x-capture-namespace: "%REQ(Host)%"

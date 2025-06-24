@@ -1,7 +1,12 @@
-# Deploy the global VirtualService in istio-system namespace
----
+# Patch to configure global VirtualService
+# The namespace will be set by ArgoCD when deploying
 apiVersion: networking.istio.io/v1beta1
 kind: VirtualService
 metadata:
   name: global-traffic-capture
-  namespace: istio-system  # Override namespace for global routing
+  # DO NOT hardcode namespace here - ArgoCD will set it
+spec:
+  # The full configuration is in base/global-routing/global-virtualservice.yaml
+  # This patch can be used to add production-specific overrides
+  # For example, to update the destination host with full namespace:
+  # (This would be done via ArgoCD kustomize patches)

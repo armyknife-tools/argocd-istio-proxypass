@@ -1,61 +1,83 @@
-# Wildcard VirtualService for automatic traffic capture
-# This captures ALL services in the namespace without per-service configuration
+# Wildcard VirtualService for namespace-scoped traffic capture
 apiVersion: networking.istio.io/v1beta1
 kind: VirtualService
 metadata:
   name: wildcard-all-services
 spec:
-  hosts:
-  # Match all services in the namespace
-  - "*.perf-test-app-sbx.svc.cluster.local"
   exportTo:
-  - "."  # Only export within this namespace
+  - "."  # Only export within the namespace
   gateways:
   - mesh
+  hosts:
+  # This will match all services in the current namespace
+  - "*.svc.cluster.local"
   http:
-  # Route all traffic through the proxy
+  - match:
+    - headers:
+        x-forwarded-by:
+          exact: envoy-proxy
+    route:
+    - destination:
+        host: passthrough-proxy
+        port:
+          number: 8080
   - route:
     - destination:
-        host: passthrough-proxy.perf-test-app-sbx.svc.cluster.local
+        host: passthrough-proxy
         port:
           number: 8080
       headers:
         request:
           set:
             x-original-host: "%REQ(:AUTHORITY)%"
+            x-forwarded-by: envoy-proxy
 ---
-# VirtualService for proxy - ensures it can be accessed directly
+# Direct access to proxy (prevents loops)
 apiVersion: networking.istio.io/v1beta1
 kind: VirtualService
 metadata:
   name: passthrough-proxy-direct
 spec:
+  exportTo:
+  - "."
   hosts:
   - passthrough-proxy
-  - passthrough-proxy.perf-test-app-sbx
-  - passthrough-proxy.perf-test-app-sbx.svc
-  - passthrough-proxy.perf-test-app-sbx.svc.cluster.local
+  - passthrough-proxy.svc
+  - passthrough-proxy.svc.cluster.local
+  gateways:
+  - mesh
   http:
-  - route:
+  - match:
+    - headers:
+        x-forwarded-by:
+          exact: envoy-proxy
+    route:
     - destination:
-        host: passthrough-proxy.perf-test-app-sbx.svc.cluster.local
+        host: passthrough-proxy
         port:
           number: 8080
 ---
-# VirtualService for collector - ensures it can be accessed directly
+# Direct access to collector (prevents loops)
 apiVersion: networking.istio.io/v1beta1
 kind: VirtualService
 metadata:
   name: traffic-collector-direct
 spec:
+  exportTo:
+  - "."
   hosts:
   - traffic-collector
-  - traffic-collector.perf-test-app-sbx
-  - traffic-collector.perf-test-app-sbx.svc
-  - traffic-collector.perf-test-app-sbx.svc.cluster.local
+  - traffic-collector.svc
+  - traffic-collector.svc.cluster.local
+  gateways:
+  - mesh
   http:
-  - route:
+  - match:
+    - headers:
+        x-forwarded-by:
+          exact: envoy-proxy
+    route:
     - destination:
-        host: traffic-collector.perf-test-app-sbx.svc.cluster.local
+        host: traffic-collector
         port:
           number: 9000
