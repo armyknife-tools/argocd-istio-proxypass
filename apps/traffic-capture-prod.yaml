@@ -11,7 +11,7 @@ spec:
   source:
     repoURL: https://github.com/armyknife-tools/argocd-istio-proxypass
     targetRevision: HEAD
-    path: v3/namespace-only/argo-cd-deployment/overlays/prod
+    path: manifests
   
   destination:
     server: https://kubernetes.default.svc
