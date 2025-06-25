@@ -23,7 +23,6 @@ spec:
       selfHeal: true
       allowEmpty: false
     syncOptions:
-    - CreateNamespace=false  # We already created it with Istio labels
     - PrunePropagationPolicy=foreground
     retry:
       limit: 5
